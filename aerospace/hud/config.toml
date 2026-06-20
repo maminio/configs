@@ -1,0 +1,54 @@
+[hud]
+# Overall panel alpha. Color alpha values below still apply.
+opacity = 0.5
+
+header_text = "{workspace}"
+
+# Header supports {workspace}, {row}, and {col}.
+# Layout.
+tile_width = 20
+tile_height = 20
+minimum_width = 180
+margin = 14
+gap = 8
+header_height = 0
+screen_padding = 8
+
+# Menu bar status item (whole-setup health + actions). Set false to hide.
+show_menu_bar = true
+
+# Timing.
+auto_hide_delay = 1.6
+
+# Shape and chrome.
+background_corner_radius = 12
+tile_corner_radius = 7
+label_corner_radius = 5
+selected_border_width = 3.5
+occupied_border_width = 1
+shadow = true
+
+# Fonts.
+header_font_size = 14
+workspace_font_size = 10.5
+app_font_size = 9.5
+tile_label_max_apps = 3
+
+# Colors accept #RGB, #RGBA, #RRGGBB, or #RRGGBBAA.
+background_color = "#0e100dc2"
+background_border_color = "#f2eba357"
+tile_color = "#2e38298a"
+selected_color = "#ff670efa"
+occupied_border_color = "#f5f7e642"
+label_background_color = "#0b0d0b8f"
+empty_label_background_color = "#0b0d0b61"
+header_text_color = "#f5f7e6fa"
+workspace_text_color = "#f2f5e8fa"
+app_text_color = "#f5f7edeb"
+
+# Rename or hide app labels. Key = the real app name (case-insensitive),
+# value = what to show. Empty string hides the label (icon still shows).
+# Real names searchable; only the displayed text changes.
+[app_names]
+"Google Chrome" = ""
+"Ghostty" = "term"

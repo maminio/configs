@@ -1,0 +1,39 @@
+onboarding = false
+
+[theme]
+name = "vesper"
+
+[ui.sound]
+enabled = true
+
+[ui.toast]
+delivery = "terminal"
+
+[advanced]
+scrollback_limit_bytes = 104857600
+
+[ui]
+mouse_capture = true
+show_agent_labels_on_pane_borders = true
+agent_panel_scope = "all"
+# sidebar_width = 32
+sidebar_min_width = 1
+sidebar_max_width = 36
+mouse_scroll_lines = 3
+
+[keys]
+prefix = "ctrl+a"
+# new_workspace = "cmd+n"
+new_tab = "prefix+t"
+next_tab = "ctrl+e"
+previous_tab = "ctrl+w"
+rename_tab = "prefix+."
+rename_workspace = "prefix+>"
+previous_workspace = "ctrl+q"
+next_workspace = "ctrl+d"
+toggle_sidebar = "ctrl+b"
+
+focus_pane_left = "prefix+left"
+focus_pane_down = "prefix+down"
+focus_pane_up = "prefix+up"
+focus_pane_right = "prefix+right"

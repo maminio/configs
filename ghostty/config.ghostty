@@ -1,0 +1,13 @@
+theme = Citruszest
+background-opacity = 0.8
+background-blur-radius = 80
+
+# Herdr runs long-lived multiplexed sessions. Keep Ghostty tab labels visible
+# and prevent shell integration from replacing them with cwd/command titles.
+macos-titlebar-style = tabs
+shell-integration-features = cursor,no-sudo,no-title,no-ssh-env,no-ssh-terminfo,path
+keybind = super+shift+.=prompt_tab_title
+keybind = super+d=ignore
+
+# Start each new Ghostty terminal surface in the Herdr session picker.
+command = /bin/zsh -lic "hs; exec /bin/zsh -l"

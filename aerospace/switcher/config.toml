@@ -1,0 +1,46 @@
+# AeroSpace Switcher — appearance + layout.
+# Copy to ~/.config/aerospace-switcher/config.toml or edit in place and rebuild.
+# Colors accept #rgb, #rgba, #rrggbb, or #rrggbbaa.
+
+[switcher]
+# Overlay width in points (height grows with the visible row count).
+width = 720
+
+# Per-row height and the header band height.
+row_height = 30
+header_height = 34
+
+# Cap on rows drawn at once; longer lists scroll to keep the selection visible.
+max_visible_rows = 12
+
+# Panel + selected-row rounding.
+corner_radius = 14
+row_corner_radius = 7
+
+# Right-aligned app-name column width; the title fills whatever remains.
+app_column_width = 240
+icon_size = 18
+number_column_width = 34
+
+# Fonts.
+header_font_size = 12
+row_font_size = 14
+number_font_size = 12
+
+# Selected row fill + text (Contexts-style orange by default).
+selected_color = "#d66b1ff2"
+selected_text_color = "#fffffffa"
+
+# Unselected text.
+app_text_color = "#ffffffeb"
+title_text_color = "#fffffff2"
+dim_text_color = "#ffffff6b"
+header_text_color = "#ffffff80"
+border_color = "#ffffff1f"
+
+# Rename or hide app labels. Key = the real app name (case-insensitive),
+# value = what to show. Empty string hides the label (icon still shows).
+# Real names stay searchable; only the displayed text changes.
+[app_names]
+"Google Chrome" = ""
+"Ghostty" = "term"
