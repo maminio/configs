@@ -1,0 +1,30 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Editor/IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*.orig
+
+# Local environment/secrets
+.env
+.env.*
+!.env.example
+
+# Build artifacts
+.build/
+DerivedData/
+*.app/
