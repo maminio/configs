@@ -50,8 +50,8 @@ def test_mission_control_uses_active_rows_and_columns() -> None:
     assert "rowSet.insert(row)" in body, "Rows should become active from occupied workspaces"
     assert "colSet.insert(col)" in body, "Columns should become active from occupied workspaces"
     assert "windows.isEmpty" in body, "Empty workspaces should not activate rows or columns"
-    assert "Array(rowSet).sorted()" in body, "Active rows should be sorted for stable layout"
-    assert "Array(colSet).sorted()" in body, "Active columns should be sorted for stable layout"
+    assert "rowSet.min()!...rowSet.max()!" in body, "Active rows should span a contiguous range so interior empties keep their slot"
+    assert "colSet.min()!...colSet.max()!" in body, "Active columns should span a contiguous range so interior empties keep their slot"
     assert "workspaceRows, workspaceCols" not in body, "Mission Control should not force the whole 9×10 grid"
 
 
@@ -97,6 +97,51 @@ def test_empty_tiles_are_subtle_but_visible() -> None:
     assert empty >= occupied * 0.55, "Empty tiles should remain visible enough to target"
 
 
+def test_mission_control_keyboard_controls() -> None:
+    key_body = function_body("keyDown")
+    adjacent_body = function_body("adjacentWorkspace")
+    toggle_body = function_body("toggleMissionControl")
+    jump_body = function_body("jump")
+
+    assert "acceptsFirstResponder" in swift, "Mission Control should be able to receive key events"
+    assert "keyboardNavigationDirection(for: event)" in key_body, "keyDown should route WASD navigation"
+    assert 'case "w": return .up' in swift, "W should move to the previous visible row"
+    assert 'case "a": return .left' in swift, "A should move to the previous visible column"
+    assert 'case "s": return .down' in swift, "S should move to the next visible row"
+    assert 'case "d": return .right' in swift, "D should move to the next visible column"
+    assert "case 123: return .left" in swift, "Left Arrow should move to the previous visible column"
+    assert "case 124: return .right" in swift, "Right Arrow should move to the next visible column"
+    assert "case 125: return .down" in swift, "Down Arrow should move to the next visible row"
+    assert "case 126: return .up" in swift, "Up Arrow should move to the previous visible row"
+    assert "visibleRowValues.firstIndex(of: row)" in adjacent_body, "Navigation should use visible Mission Control rows"
+    assert "visibleColValues.firstIndex(of: col)" in adjacent_body, "Navigation should use visible Mission Control columns"
+    assert "onKeyboardWorkspaceNavigate?(workspace)" in key_body, "WASD and arrows should switch to the computed workspace"
+    assert "jump(to: workspace, showMiniHud: false, refocusMissionControl: true)" in swift, "Navigation should keep Mission Control open"
+    assert "case 36, 49, 76:" in key_body, "Return, Space, and keypad Enter should activate the highlighted workspace"
+    assert "onWorkspaceClick?(focusedWorkspace)" in key_body, "Activation keys should reuse click-to-focus behavior"
+    assert "event.keyCode == 53" in key_body, "Escape should be handled explicitly"
+    assert "onKeyboardDismiss?()" in key_body, "Escape should request Mission Control dismissal"
+    assert "missionView.onKeyboardDismiss" in swift, "App delegate should wire keyboard dismissal"
+    assert "self?.hideMissionControl()" in swift, "Keyboard dismissal should close Mission Control"
+    assert "missionPanel.orderFrontRegardless()" in toggle_body, "Opening Mission Control should order the hidden panel onscreen"
+    assert "refocusMissionControlKeyboard()" in toggle_body, "Opening Mission Control should focus the key handler"
+    assert "missionPanel.makeFirstResponder(missionView)" in swift, "Focus helper should target the Mission Control key handler"
+    assert "refocusMissionControl: true" in swift, "Keyboard navigation should request focus restoration after AeroSpace switches apps"
+    assert "refocusMissionControlKeyboard(after: 0.15)" in jump_body, "Keyboard navigation should re-key Mission Control after app focus settles"
+
+
+def test_mission_control_dismisses_before_focusing_window() -> None:
+    launch_body = function_body("applicationDidFinishLaunching")
+    start = launch_body.index("missionView.onWindowClick")
+    end = launch_body.index("missionView.onWindowMove", start)
+    click_handler = launch_body[start:end]
+
+    assert click_handler.index("hideMissionControl()") < click_handler.index("focus(window: window)"), (
+        "Mission Control must dismiss before AeroSpace focuses a clicked window, "
+        "or panel teardown can restore the previously active app"
+    )
+
+
 if __name__ == "__main__":
     failures = []
     for test in (
@@ -106,6 +151,8 @@ if __name__ == "__main__":
         test_plus_click_does_not_fall_through_to_workspace_click,
         test_empty_cells_are_visible_drop_targets,
         test_empty_tiles_are_subtle_but_visible,
+        test_mission_control_keyboard_controls,
+        test_mission_control_dismisses_before_focusing_window,
     ):
         try:
             test()

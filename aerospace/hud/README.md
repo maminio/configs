@@ -52,6 +52,8 @@ workspace, displays compact app names per workspace, and supports click-to-jump.
 - Separate 70%-screen Mission Control panel with active rows and columns
 - Empty cells inside active row/column intersections are translucent drop targets
 - Click tile to jump to that workspace
+- `w`/`a`/`s`/`d` or arrow-key navigation between visible Mission Control tiles
+- `Enter`/`Space` focuses the selected workspace; `Esc` closes Mission Control
 - Fast highlight updates through `/tmp/aerospace-hud-focused-workspace`
 
 ## Files
@@ -150,6 +152,9 @@ Colors accept `#RGB`, `#RGBA`, `#RRGGBB`, or `#RRGGBBAA`.
 
 - Click tile: jump to workspace
 - `cmd-3`: toggle the large Mission Control panel from AeroSpace
+- In Mission Control, use `w`/`a`/`s`/`d` or arrow keys to navigate, `Enter` or
+  `Space` to focus the selected workspace and close, and `Esc` to close without
+  switching
 - In Mission Control, drag app/window chip to any tile, including empty translucent cells: move that window to the target workspace
 - In Mission Control, hover an edge for the `+` button, then click it to add one empty row or column without switching workspaces
 - Right-click: open HUD menu
@@ -157,7 +162,7 @@ Colors accept `#RGB`, `#RGBA`, `#RRGGBB`, or `#RRGGBBAA`.
 - Drag HUD background/tile: move HUD
 - Move workspace with keyboard: HUD highlight updates from state file
 - Hover HUD: pause auto-hide
-- Mission Control stays open for drag moves until `cmd-3` is pressed again.
+- Mission Control stays open for drag moves until `cmd-3` or `Esc` is pressed.
 
 Position:
 

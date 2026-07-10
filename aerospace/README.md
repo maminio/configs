@@ -88,7 +88,9 @@ active rows and active columns: a row or column is active when at least one app
 exists anywhere in it. Empty intersections inside that active grid remain visible
 as translucent drop targets. Drag an app/window chip from one tile to another to
 move that window without switching focus. Hover an edge for the `+` button, then
-click it to add one empty row or column without jumping to that workspace.
+click it to add one empty row or column without jumping to that workspace. Use
+`w`/`a`/`s`/`d` or arrow keys to navigate, `Enter`/`Space` to focus the selected
+workspace and close Mission Control, and `Esc` to close it without switching.
 
 See [hud/README.md](hud/README.md) for controls, troubleshooting, and best
 practices.

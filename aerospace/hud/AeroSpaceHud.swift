@@ -10,6 +10,13 @@ private let focusedStatePath = "/tmp/aerospace-hud-focused-workspace"
 private let missionControlSignalPath = "/tmp/aerospace-mission-control-toggle"
 private let autoHideEnabled = ProcessInfo.processInfo.environment["AEROSPACE_HUD_AUTO_HIDE"] != "0"
 
+private enum GridNavigationDirection {
+    case up
+    case down
+    case left
+    case right
+}
+
 private func workspaceName(row: Int, col: Int) -> String {
     "w\(row)\(col)"
 }
@@ -87,6 +94,7 @@ private struct HudConfig {
     var tileHeight: CGFloat = 58
     var minimumWidth: CGFloat = 180
     var screenPadding: CGFloat = 8
+    var missionSnapThreshold: CGFloat = 24
     var backgroundCornerRadius: CGFloat = 12
     var tileCornerRadius: CGFloat = 7
     var labelCornerRadius: CGFloat = 5
@@ -125,6 +133,7 @@ private struct HudConfig {
         config.tileHeight = values.cgFloat("tile_height", default: config.tileHeight, min: 28, max: 180)
         config.minimumWidth = values.cgFloat("minimum_width", default: config.minimumWidth, min: 80, max: 1200)
         config.screenPadding = values.cgFloat("screen_padding", default: config.screenPadding, min: 0, max: 80)
+        config.missionSnapThreshold = values.cgFloat("mission_snap_threshold", default: config.missionSnapThreshold, min: 0, max: 200)
         config.backgroundCornerRadius = values.cgFloat("background_corner_radius", default: config.backgroundCornerRadius, min: 0, max: 40)
         config.tileCornerRadius = values.cgFloat("tile_corner_radius", default: config.tileCornerRadius, min: 0, max: 32)
         config.labelCornerRadius = values.cgFloat("label_corner_radius", default: config.labelCornerRadius, min: 0, max: 24)
@@ -806,6 +815,8 @@ private final class MissionControlView: NSView {
     var onResetSize: (() -> Void)?
     var onRowNameCommitted: ((Int, String) -> Void)?
     var onReorderRows: ((Int, Int) -> Void)?
+    var onKeyboardWorkspaceNavigate: ((String) -> Void)?
+    var onKeyboardDismiss: (() -> Void)?
 
     // User-set project-lane names, keyed by grid row (1..9). Rows without an
     // entry fall back to `defaultRowName`. Persisted by the AppDelegate.
@@ -866,6 +877,36 @@ private final class MissionControlView: NSView {
     }
 
     override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        // Escape closes Mission Control regardless of active modifiers.
+        if event.keyCode == 53 {
+            onKeyboardDismiss?()
+            return
+        }
+
+        if let direction = keyboardNavigationDirection(for: event) {
+            if let workspace = adjacentWorkspace(for: direction) {
+                onKeyboardWorkspaceNavigate?(workspace)
+            }
+            return
+        }
+
+        let blockedModifiers: NSEvent.ModifierFlags = [.command, .control, .option]
+        guard event.modifierFlags.intersection(blockedModifiers).isEmpty else {
+            super.keyDown(with: event)
+            return
+        }
+
+        // Return, Space, and numeric-keypad Enter activate the highlighted tile.
+        switch event.keyCode {
+        case 36, 49, 76:
+            onWorkspaceClick?(focusedWorkspace)
+        default:
+            super.keyDown(with: event)
+        }
+    }
 
     // Native macOS look: the panel rides on a dark vibrancy blur, so the view
     // draws translucent whites + the system accent rather than the olive HUD
@@ -1014,6 +1055,58 @@ private final class MissionControlView: NSView {
         visibleCols = visibleColValues.count
         clearPlusButton()
         needsDisplay = true
+    }
+
+    private func keyboardNavigationDirection(for event: NSEvent) -> GridNavigationDirection? {
+        let blockedModifiers: NSEvent.ModifierFlags = [.command, .control, .option]
+        guard event.modifierFlags.intersection(blockedModifiers).isEmpty else { return nil }
+
+        // macOS virtual key codes: left, right, down, up. Arrow events can carry
+        // the .function modifier, so resolve them before filtering Fn+WASD.
+        switch event.keyCode {
+        case 123: return .left
+        case 124: return .right
+        case 125: return .down
+        case 126: return .up
+        default: break
+        }
+
+        guard !event.modifierFlags.contains(.function) else { return nil }
+        switch event.charactersIgnoringModifiers?.lowercased() {
+        case "w": return .up
+        case "a": return .left
+        case "s": return .down
+        case "d": return .right
+        default: return nil
+        }
+    }
+
+    private func adjacentWorkspace(for direction: GridNavigationDirection) -> String? {
+        guard let row = workspaceRow(focusedWorkspace),
+              let col = workspaceColumn(focusedWorkspace),
+              let rowIndex = visibleRowValues.firstIndex(of: row),
+              let colIndex = visibleColValues.firstIndex(of: col)
+        else { return nil }
+
+        let nextRowIndex: Int
+        let nextColIndex: Int
+        switch direction {
+        case .up:
+            nextRowIndex = max(0, rowIndex - 1)
+            nextColIndex = colIndex
+        case .down:
+            nextRowIndex = min(visibleRowValues.count - 1, rowIndex + 1)
+            nextColIndex = colIndex
+        case .left:
+            nextRowIndex = rowIndex
+            nextColIndex = max(0, colIndex - 1)
+        case .right:
+            nextRowIndex = rowIndex
+            nextColIndex = min(visibleColValues.count - 1, colIndex + 1)
+        }
+
+        guard nextRowIndex != rowIndex || nextColIndex != colIndex else { return nil }
+        return workspaceName(row: visibleRowValues[nextRowIndex], col: visibleColValues[nextColIndex])
     }
 
     // Every Mission Control cell is painted and hit-testable so empty
@@ -1368,8 +1461,20 @@ private final class MissionControlView: NSView {
         }
 
         if didDrag {
-            window.setFrameOrigin(NSPoint(x: origin.x + dx, y: origin.y + dy))
+            let proposedX = origin.x + dx
+            window.setFrameOrigin(NSPoint(x: snappedOriginX(proposedX, window: window), y: origin.y + dy))
         }
+    }
+
+    // Spotlight-style magnet: while dragging, the panel sticks to the screen's
+    // horizontal center once its own center lands within the snap threshold, so
+    // it has to be pulled past the threshold to break free. Releasing on the
+    // snap saves the centered frame, so it stays sticky across opens.
+    private func snappedOriginX(_ proposedX: CGFloat, window: NSWindow) -> CGFloat {
+        let threshold = config.missionSnapThreshold
+        guard threshold > 0, let screen = window.screen ?? NSScreen.main else { return proposedX }
+        let centeredX = screen.visibleFrame.midX - window.frame.width / 2
+        return abs(proposedX - centeredX) <= threshold ? centeredX : proposedX
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -2168,8 +2273,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.hideMissionControl()
         }
         missionView.onWindowClick = { [weak self] window in
-            self?.focus(window: window)
-            self?.hideMissionControl()
+            guard let self else { return }
+            // Dismiss first so Mission Control's key-panel teardown cannot
+            // restore the previously active app after AeroSpace focuses this
+            // window. Finder is especially prone to losing that race.
+            self.hideMissionControl()
+            self.focus(window: window)
         }
         missionView.onWindowMove = { [weak self] window, workspace in
             self?.move(window: window, to: workspace)
@@ -2186,6 +2295,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         missionView.onReorderRows = { [weak self] from, to in
             self?.reorderRows(from: from, to: to)
+        }
+        missionView.onKeyboardWorkspaceNavigate = { [weak self] workspace in
+            self?.jump(to: workspace, showMiniHud: false, refocusMissionControl: true)
+        }
+        missionView.onKeyboardDismiss = { [weak self] in
+            self?.hideMissionControl()
         }
         view.onResetSize = { [weak self] in
             self?.resetMiniHudSize()
@@ -2444,8 +2559,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         suppressFrameSave = false
     }
 
-    // Mission Control shows active rows and active columns only. A row or
-    // column is active when at least one app exists anywhere in it.
+    // Mission Control spans the active rows and columns. A row or column is
+    // active when at least one app exists anywhere in it; the visible span is
+    // the contiguous range from the first to the last active row/column, so an
+    // empty workspace wedged between two active ones keeps its slot instead of
+    // collapsing and sliding its neighbors together.
     private func missionControlGrid() -> (rows: [Int], cols: [Int]) {
         var rowSet = Set<Int>()
         var colSet = Set<Int>()
@@ -2461,7 +2579,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         if rowSet.isEmpty { rowSet.insert(1) }
         if colSet.isEmpty { colSet.insert(0) }
 
-        return (Array(rowSet).sorted(), Array(colSet).sorted())
+        let rows = Array(rowSet.min()!...rowSet.max()!)
+        let cols = Array(colSet.min()!...colSet.max()!)
+        return (rows, cols)
     }
 
     private func missionControlFrame() -> NSRect {
@@ -2628,7 +2748,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         return signature
     }
 
-    private func setFocusedWorkspace(_ workspace: String) {
+    private func setFocusedWorkspace(_ workspace: String, showMiniHud: Bool = true) {
         guard workspace.range(of: #"^w[1-9][0-9]$"#, options: .regularExpression) != nil else { return }
 
         let focusedChanged = view.focusedWorkspace != workspace
@@ -2636,7 +2756,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         missionView.focusedWorkspace = workspace
         let gridChanged = updateVisibleGrid()
 
-        if focusedChanged || gridChanged {
+        if showMiniHud && (focusedChanged || gridChanged) {
             showPanelTemporarily()
         }
 
@@ -2646,12 +2766,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         try? "\(workspace)\n".write(toFile: focusedStatePath, atomically: true, encoding: .utf8)
     }
 
-    private func jump(to workspace: String) {
-        setFocusedWorkspace(workspace)
+    private func jump(to workspace: String, showMiniHud: Bool = true, refocusMissionControl: Bool = false) {
+        setFocusedWorkspace(workspace, showMiniHud: showMiniHud)
         writeFocusedState(workspace)
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.aerospace.switchWorkspace(workspace)
+            guard let self else { return }
+            self.aerospace.switchWorkspace(workspace)
+            guard refocusMissionControl else { return }
+
+            DispatchQueue.main.async { [weak self] in
+                self?.refocusMissionControlKeyboard()
+                self?.refocusMissionControlKeyboard(after: 0.15)
+            }
         }
     }
 
@@ -2823,7 +2950,26 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         missionPanel.setFrame(frame, display: true)
         suppressMissionFrameSave = false
         missionPanel.orderFrontRegardless()
+        refocusMissionControlKeyboard()
         installMissionClickMonitor()
+    }
+
+    private func refocusMissionControlKeyboard(after delay: TimeInterval = 0) {
+        if delay <= 0 {
+            refocusMissionControlKeyboardNow()
+            return
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.refocusMissionControlKeyboardNow()
+        }
+    }
+
+    private func refocusMissionControlKeyboardNow() {
+        guard let missionPanel, missionPanel.isVisible else { return }
+        missionPanel.orderFrontRegardless()
+        missionPanel.makeKey()
+        missionPanel.makeFirstResponder(missionView)
     }
 
     private func hideMissionControl() {

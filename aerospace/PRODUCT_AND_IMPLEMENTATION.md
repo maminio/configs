@@ -62,6 +62,11 @@ It supports:
 - Click workspace tile: switch to that workspace and close Mission Control.
 - Drag app/window chip to any tile, including empty translucent cells: move
   that AeroSpace window to the target workspace.
+- Press `w`/`a`/`s`/`d` or an arrow key: switch to the adjacent visible
+  workspace while keeping Mission Control open.
+- Press `Enter` or `Space`: switch to the highlighted workspace and close
+  Mission Control.
+- Press `Esc`: close Mission Control without switching workspaces.
 - Hover an edge for the `+` button, then click it to add one empty row or column
   without switching workspaces.
 - Press `cmd-3` again: close Mission Control.
@@ -124,6 +129,8 @@ Primary grid controls:
 - `cmd-shift-1`: move up one row.
 - `cmd-shift-2`: move down one row.
 - `alt-1..alt-9`: jump to row starts `w10..w90`.
+- While Mission Control is open: `w`/`a`/`s`/`d` or arrow keys navigate visible
+  tiles and keep the panel open; `Enter`/`Space` selects, and `Esc` closes.
 
 Move focused window:
 

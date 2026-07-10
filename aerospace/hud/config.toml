@@ -14,6 +14,10 @@ gap = 8
 header_height = 0
 screen_padding = 8
 
+# Spotlight-style magnet: dragging Mission Control sticks to the screen's
+# horizontal center within this many pixels. 0 disables the snap.
+mission_snap_threshold = 24
+
 # Menu bar status item (whole-setup health + actions). Set false to hide.
 show_menu_bar = true
 
