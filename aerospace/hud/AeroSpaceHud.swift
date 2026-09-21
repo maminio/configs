@@ -17,6 +17,11 @@ private enum GridNavigationDirection {
     case right
 }
 
+private enum WorkspaceInsertionPosition: Equatable {
+    case before
+    case after
+}
+
 private func workspaceName(row: Int, col: Int) -> String {
     "w\(row)\(col)"
 }
@@ -95,6 +100,25 @@ private struct HudConfig {
     var minimumWidth: CGFloat = 180
     var screenPadding: CGFloat = 8
     var missionSnapThreshold: CGFloat = 24
+    var missionGlassStyle = "clear"
+    var missionGlassCornerRadius: CGFloat = 30
+    var missionPanelOpacity: CGFloat = 1
+    var missionGlassTintColor = NSColor(calibratedWhite: 0.02, alpha: 1)
+    var missionGlassTintOpacity: CGFloat = 0.08
+    var missionBackgroundColor = NSColor(calibratedWhite: 0.02, alpha: 1)
+    var missionBackgroundOpacity: CGFloat = 0.18
+    var missionTileColor = NSColor(calibratedWhite: 0.02, alpha: 0.10)
+    var missionEmptyTileColor = NSColor(calibratedWhite: 0.02, alpha: 0.045)
+    var missionTileBorderColor = NSColor(calibratedWhite: 0.01, alpha: 0.60)
+    var missionTileBorderWidth: CGFloat = 1
+    var missionTileCornerRadius: CGFloat = 15
+    var missionHoverColor = NSColor(calibratedWhite: 1, alpha: 0.075)
+    var missionAccentColor = NSColor(calibratedWhite: 0.04, alpha: 0.78)
+    var missionAccentBorderColor = NSColor(calibratedWhite: 0.01, alpha: 0.94)
+    var missionAccentTextColor = NSColor(calibratedWhite: 0.96, alpha: 1)
+    var missionPrimaryTextColor = NSColor.labelColor
+    var missionSecondaryTextColor = NSColor.secondaryLabelColor
+    var missionRowTextColor = NSColor.secondaryLabelColor
     var backgroundCornerRadius: CGFloat = 12
     var tileCornerRadius: CGFloat = 7
     var labelCornerRadius: CGFloat = 5
@@ -134,6 +158,45 @@ private struct HudConfig {
         config.minimumWidth = values.cgFloat("minimum_width", default: config.minimumWidth, min: 80, max: 1200)
         config.screenPadding = values.cgFloat("screen_padding", default: config.screenPadding, min: 0, max: 80)
         config.missionSnapThreshold = values.cgFloat("mission_snap_threshold", default: config.missionSnapThreshold, min: 0, max: 200)
+        if let style = values.string("mission_control.glass_style")?.lowercased(), ["clear", "regular"].contains(style) {
+            config.missionGlassStyle = style
+        }
+        config.missionGlassCornerRadius = values.cgFloat(
+            "mission_control.corner_radius",
+            default: config.missionGlassCornerRadius,
+            min: 0,
+            max: 80
+        )
+        config.missionPanelOpacity = values.cgFloat(
+            "mission_control.panel_opacity",
+            default: config.missionPanelOpacity,
+            min: 0.1,
+            max: 1
+        )
+        config.missionGlassTintOpacity = values.cgFloat(
+            "mission_control.glass_tint_opacity",
+            default: config.missionGlassTintOpacity,
+            min: 0,
+            max: 1
+        )
+        config.missionBackgroundOpacity = values.cgFloat(
+            "mission_control.background_opacity",
+            default: config.missionBackgroundOpacity,
+            min: 0,
+            max: 1
+        )
+        config.missionTileBorderWidth = values.cgFloat(
+            "mission_control.tile_border_width",
+            default: config.missionTileBorderWidth,
+            min: 0,
+            max: 8
+        )
+        config.missionTileCornerRadius = values.cgFloat(
+            "mission_control.tile_corner_radius",
+            default: config.missionTileCornerRadius,
+            min: 0,
+            max: 48
+        )
         config.backgroundCornerRadius = values.cgFloat("background_corner_radius", default: config.backgroundCornerRadius, min: 0, max: 40)
         config.tileCornerRadius = values.cgFloat("tile_corner_radius", default: config.tileCornerRadius, min: 0, max: 32)
         config.labelCornerRadius = values.cgFloat("label_corner_radius", default: config.labelCornerRadius, min: 0, max: 24)
@@ -146,6 +209,18 @@ private struct HudConfig {
         config.shadowEnabled = values.bool("shadow", default: config.shadowEnabled)
         config.showMenuBar = values.bool("show_menu_bar", default: config.showMenuBar)
 
+        config.missionGlassTintColor = values.color("mission_control.glass_tint_color") ?? config.missionGlassTintColor
+        config.missionBackgroundColor = values.color("mission_control.background_color") ?? config.missionBackgroundColor
+        config.missionTileColor = values.color("mission_control.tile_color") ?? config.missionTileColor
+        config.missionEmptyTileColor = values.color("mission_control.empty_tile_color") ?? config.missionEmptyTileColor
+        config.missionTileBorderColor = values.color("mission_control.tile_border_color") ?? config.missionTileBorderColor
+        config.missionHoverColor = values.color("mission_control.hover_color") ?? config.missionHoverColor
+        config.missionAccentColor = values.color("mission_control.accent_color") ?? config.missionAccentColor
+        config.missionAccentBorderColor = values.color("mission_control.accent_border_color") ?? config.missionAccentBorderColor
+        config.missionAccentTextColor = values.color("mission_control.accent_text_color") ?? config.missionAccentTextColor
+        config.missionPrimaryTextColor = values.color("mission_control.primary_text_color") ?? config.missionPrimaryTextColor
+        config.missionSecondaryTextColor = values.color("mission_control.secondary_text_color") ?? config.missionSecondaryTextColor
+        config.missionRowTextColor = values.color("mission_control.row_text_color") ?? config.missionRowTextColor
         config.backgroundColor = values.color("background_color") ?? config.backgroundColor
         config.backgroundBorderColor = values.color("background_border_color") ?? config.backgroundBorderColor
         config.tileColor = values.color("tile_color") ?? config.tileColor
@@ -158,6 +233,13 @@ private struct HudConfig {
         config.appTextColor = values.color("app_text_color") ?? config.appTextColor
 
         return config
+    }
+
+    static func modificationDate() -> Date? {
+        guard let path = configPath(),
+              let attributes = try? FileManager.default.attributesOfItem(atPath: path)
+        else { return nil }
+        return attributes[.modificationDate] as? Date
     }
 
     private static func configPath() -> String? {
@@ -220,8 +302,14 @@ private struct HudConfig {
                 continue
             }
 
-            guard section.isEmpty || section == "hud" else { continue }
-            values[key] = value
+            switch section {
+            case "", "hud":
+                values[key] = value
+            case "mission_control":
+                values["mission_control.\(key)"] = value
+            default:
+                continue
+            }
         }
 
         return values
@@ -272,7 +360,7 @@ private extension Dictionary where Key == String, Value == String {
         guard let raw = self[key] else { return nil }
         if raw.hasPrefix("\""), raw.hasSuffix("\""),
            let data = raw.data(using: .utf8),
-           let decoded = try? JSONSerialization.jsonObject(with: data) as? String
+           let decoded = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? String
         {
             return decoded
         }
@@ -807,6 +895,7 @@ private final class MissionControlView: NSView {
     var onWorkspaceClick: ((String) -> Void)?
     var onWindowClick: ((WorkspaceWindow) -> Void)?
     var onWindowMove: ((WorkspaceWindow, String) -> Void)?
+    var onInsertWorkspace: ((String, WorkspaceInsertionPosition) -> Void)?
     var onInteractionStart: (() -> Void)?
     var onInteractionEnd: (() -> Void)?
     var onPointerEnter: (() -> Void)?
@@ -878,6 +967,10 @@ private final class MissionControlView: NSView {
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
+    // NSGlassEffectView otherwise remaps custom content colors for adaptive
+    // legibility. Mission Control exposes literal TOML color tokens, so keep
+    // glass/lensing in the parent while drawing this content without vibrancy.
+    override var allowsVibrancy: Bool { false }
 
     override func keyDown(with event: NSEvent) {
         // Escape closes Mission Control regardless of active modifiers.
@@ -908,32 +1001,21 @@ private final class MissionControlView: NSView {
         }
     }
 
-    // Native macOS look: the panel rides on a dark vibrancy blur, so the view
-    // draws translucent whites + the system accent rather than the olive HUD
-    // theme used by the mini HUD.
+    // Mission Control is content inside one native Liquid Glass navigation
+    // plane. Tiles and chips use semantic fills rather than nested glass, which
+    // preserves hierarchy and lets AppKit adapt the material to its environment.
     fileprivate enum Style {
-        static let panelRadius: CGFloat = 18
-        static let tileRadius: CGFloat = 11
-        static let pad: CGFloat = 12
-        static let badgeHeight: CGFloat = 17
-        static let rowHeight: CGFloat = 20
-        static let rowGap: CGFloat = 2
-        static let railWidth: CGFloat = 24   // left gutter for vertical row names
-
-        static let tileFill = NSColor.white.withAlphaComponent(0.06)
-        static let tileFillEmpty = NSColor.white.withAlphaComponent(0.04)
-        static let tileBorder = NSColor.white.withAlphaComponent(0.08)
-        static let tileFocusFill = NSColor.controlAccentColor.withAlphaComponent(0.14)
-        static let badgeFill = NSColor.white.withAlphaComponent(0.11)
-        static let badgeText = NSColor.white.withAlphaComponent(0.62)
-        static let appText = NSColor.white.withAlphaComponent(0.95)
-        static let titleText = NSColor.white.withAlphaComponent(0.5)
-        static let rowHover = NSColor.white.withAlphaComponent(0.05)
-        static var accent: NSColor { NSColor.controlAccentColor }
+        static let chipRadius: CGFloat = 8
+        static let pad: CGFloat = 13
+        static let badgeHeight: CGFloat = 16
+        static let rowHeight: CGFloat = 24
+        static let rowGap: CGFloat = 4
+        static let railWidth: CGFloat = 30
     }
 
     // Overflow-strip icon under the pointer: shows its app name as a tooltip.
     private var hoveredOverflowIcon: (window: WorkspaceWindow, rect: NSRect)?
+    private var hoveredWindowID: String?
     private var tooltipProgress: CGFloat = 0
     private var tooltipTimer: Timer?
 
@@ -989,18 +1071,111 @@ private final class MissionControlView: NSView {
     init(frame frameRect: NSRect, config: HudConfig) {
         self.config = config
         super.init(frame: frameRect)
+        observeAccessibilityOptions()
     }
 
     required init?(coder: NSCoder) {
         self.config = HudConfig()
         super.init(coder: coder)
+        observeAccessibilityOptions()
+    }
+
+    deinit {
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
+
+    private var increaseContrast: Bool {
+        NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+    }
+
+    private var reduceTransparency: Bool {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+    }
+
+    private var reduceMotion: Bool {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    private var selectionFill: NSColor {
+        config.missionAccentColor
+    }
+
+    private var selectionBorder: NSColor {
+        config.missionAccentBorderColor
+    }
+
+    private var selectionText: NSColor {
+        config.missionAccentTextColor
+    }
+
+    private var selectionSecondaryText: NSColor {
+        config.missionAccentTextColor.withAlphaComponent(0.78)
+    }
+
+    private var tileRadius: CGFloat {
+        config.missionTileCornerRadius
+    }
+
+    private func tileFill(empty: Bool) -> NSColor {
+        let color = empty ? config.missionEmptyTileColor : config.missionTileColor
+        if reduceTransparency {
+            return color.withAlphaComponent(empty ? 0.58 : 0.82)
+        }
+        return color
+    }
+
+    private var tileBorderColor: NSColor {
+        increaseContrast
+            ? NSColor.labelColor.withAlphaComponent(0.62)
+            : config.missionTileBorderColor
+    }
+
+    private var primaryTextColor: NSColor {
+        config.missionPrimaryTextColor
+    }
+
+    private var secondaryTextColor: NSColor {
+        config.missionSecondaryTextColor
+    }
+
+    private func observeAccessibilityOptions() {
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(accessibilityDisplayOptionsChanged),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil
+        )
+    }
+
+    @objc private func accessibilityDisplayOptionsChanged() {
+        stopTooltipAnimation()
+        needsDisplay = true
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
 
-        // Background + rounded corners come from the NSVisualEffectView behind
-        // this view; draw only the grid here.
+        // Exact configurable color layer inside native glass. NSGlassEffectView
+        // tint remains adaptive; this backing makes explicit background choices
+        // deterministic while preserving lensing underneath at lower opacities.
+        if config.missionBackgroundOpacity > 0 {
+            config.missionBackgroundColor
+                .withAlphaComponent(config.missionBackgroundOpacity)
+                .setFill()
+            NSBezierPath(
+                roundedRect: bounds,
+                xRadius: config.missionGlassCornerRadius,
+                yRadius: config.missionGlassCornerRadius
+            ).fill()
+        }
+
+        // Background, lensing, and rounded corners come from NSGlassEffectView.
+        // This view draws only content-layer fills and navigation state.
         let metrics = layoutMetrics()
 
         for rowIndex in 0..<visibleRows {
@@ -1013,7 +1188,7 @@ private final class MissionControlView: NSView {
                 drawTile(workspace: workspace, rect: rect)
             }
             let row = visibleRowValues[rowIndex]
-            drawRowName(displayRowName(row), in: railRect(rowIndex: rowIndex, metrics: metrics))
+            drawRowName(displayRowName(row), row: row, in: railRect(rowIndex: rowIndex, metrics: metrics))
         }
 
         drawRowDrag(metrics: metrics)
@@ -1202,16 +1377,16 @@ private final class MissionControlView: NSView {
         guard let edge = activePlusEdge else { return }
         let rect = plusButtonRect(for: edge)
 
-        Style.accent.withAlphaComponent(0.92).setFill()
+        selectionFill.setFill()
         NSBezierPath(ovalIn: rect).fill()
-        NSColor.white.withAlphaComponent(0.25).setStroke()
+        NSColor.labelColor.withAlphaComponent(0.24).setStroke()
         let ring = NSBezierPath(ovalIn: rect.insetBy(dx: 0.5, dy: 0.5))
         ring.lineWidth = 1
         ring.stroke()
 
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 20, weight: .regular),
-            .foregroundColor: NSColor.white,
+            .foregroundColor: NSColor.alternateSelectedControlTextColor,
         ]
         let size = ("+" as NSString).size(withAttributes: attrs)
         "+".draw(
@@ -1282,12 +1457,21 @@ private final class MissionControlView: NSView {
             stopTooltipAnimation()
             needsDisplay = true
         }
+        if hoveredWindowID != nil {
+            hoveredWindowID = nil
+            needsDisplay = true
+        }
         onPointerExit?()
     }
 
     override func mouseMoved(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         updateOverflowHover(at: point)
+        let nextHoveredWindowID = window(at: point)?.window.windowID
+        if nextHoveredWindowID != hoveredWindowID {
+            hoveredWindowID = nextHoveredWindowID
+            needsDisplay = true
+        }
 
         // A revealed + button takes pointer priority over edge-resize cursors.
         if let edge = activePlusEdge, plusButtonRect(for: edge).contains(point) {
@@ -1297,6 +1481,8 @@ private final class MissionControlView: NSView {
 
         if let edges = resizeEdges(at: point) {
             resizeCursor(for: edges).set()
+        } else if nextHoveredWindowID != nil {
+            NSCursor.pointingHand.set()
         } else {
             NSCursor.arrow.set()
         }
@@ -1331,6 +1517,7 @@ private final class MissionControlView: NSView {
             hoveredOverflowIcon = nil
             stopTooltipAnimation()
         }
+        hoveredWindowID = nil
 
         // Any click outside the active editor commits the in-progress rename
         // before this click is otherwise handled.
@@ -1552,6 +1739,33 @@ private final class MissionControlView: NSView {
         onInteractionStart?()
 
         let menu = NSMenu()
+        let point = convert(event.locationInWindow, from: nil)
+        var positioningItem: NSMenuItem?
+
+        if let workspace = workspace(at: point) {
+            let beforeItem = NSMenuItem(
+                title: "Add Workspace Before",
+                action: #selector(insertWorkspaceBeforeFromMenu(_:)),
+                keyEquivalent: ""
+            )
+            beforeItem.target = self
+            beforeItem.representedObject = workspace
+            beforeItem.isEnabled = canInsertWorkspace(around: workspace, position: .before)
+            menu.addItem(beforeItem)
+            positioningItem = beforeItem
+
+            let afterItem = NSMenuItem(
+                title: "Add Workspace After",
+                action: #selector(insertWorkspaceAfterFromMenu(_:)),
+                keyEquivalent: ""
+            )
+            afterItem.target = self
+            afterItem.representedObject = workspace
+            afterItem.isEnabled = canInsertWorkspace(around: workspace, position: .after)
+            menu.addItem(afterItem)
+            menu.addItem(.separator())
+        }
+
         let reloadItem = NSMenuItem(
             title: "Reload Config",
             action: #selector(reloadConfigFromMenu(_:)),
@@ -1568,10 +1782,19 @@ private final class MissionControlView: NSView {
         resetItem.target = self
         menu.addItem(resetItem)
 
-        let point = convert(event.locationInWindow, from: nil)
-        menu.popUp(positioning: reloadItem, at: point, in: self)
+        menu.popUp(positioning: positioningItem ?? reloadItem, at: point, in: self)
 
         onInteractionEnd?()
+    }
+
+    @objc private func insertWorkspaceBeforeFromMenu(_ sender: NSMenuItem) {
+        guard let workspace = sender.representedObject as? String else { return }
+        onInsertWorkspace?(workspace, .before)
+    }
+
+    @objc private func insertWorkspaceAfterFromMenu(_ sender: NSMenuItem) {
+        guard let workspace = sender.representedObject as? String else { return }
+        onInsertWorkspace?(workspace, .after)
     }
 
     @objc private func reloadConfigFromMenu(_ sender: NSMenuItem) {
@@ -1691,6 +1914,45 @@ private final class MissionControlView: NSView {
         guard rect.contains(point) else { return nil }
 
         return workspaceName(row: row, col: col)
+    }
+
+    private func canInsertWorkspace(
+        around workspace: String,
+        position: WorkspaceInsertionPosition
+    ) -> Bool {
+        guard let row = workspaceRow(workspace),
+              let anchorColumn = workspaceColumn(workspace)
+        else { return false }
+
+        let insertionColumn = anchorColumn + (position == .after ? 1 : 0)
+        guard 0..<workspaceCols ~= insertionColumn else { return false }
+
+        let occupiedColumns = windowsByWorkspace.compactMap { candidate, windows -> Int? in
+            guard !windows.isEmpty,
+                  workspaceRow(candidate) == row
+            else { return nil }
+            return workspaceColumn(candidate)
+        }
+        let affectedColumns = occupiedColumns.filter { $0 >= insertionColumn }
+
+        // Shifting a populated suffix needs one free slot on the right. With no
+        // populated suffix, adding is useful only when it reveals a new edge cell.
+        if affectedColumns.isEmpty {
+            return !visibleColValues.contains(insertionColumn)
+        }
+        return (occupiedColumns.max() ?? insertionColumn) < workspaceCols - 1
+    }
+
+    func revealWorkspaceColumn(_ column: Int) {
+        guard 0..<workspaceCols ~= column else { return }
+        if !visibleColValues.contains(column) {
+            visibleColValues.append(column)
+            visibleColValues.sort()
+        }
+        gridOriginCol = visibleColValues.first ?? 0
+        visibleCols = visibleColValues.count
+        clearPlusButton()
+        needsDisplay = true
     }
 
     // While dragging a window against the bottom edge, reveal one empty row of
@@ -1819,16 +2081,20 @@ private final class MissionControlView: NSView {
 
         NSGraphicsContext.saveGraphicsState()
         let shadow = NSShadow()
-        shadow.shadowColor = NSColor.black.withAlphaComponent(0.5)
-        shadow.shadowBlurRadius = 12
+        shadow.shadowColor = NSColor.shadowColor.withAlphaComponent(increaseContrast ? 0.46 : 0.28)
+        shadow.shadowBlurRadius = increaseContrast ? 8 : 16
         shadow.shadowOffset = NSSize(width: 0, height: -3)
         shadow.set()
-        NSColor(calibratedWhite: 0.13, alpha: 0.98).setFill()
-        NSBezierPath(roundedRect: box, xRadius: 7, yRadius: 7).fill()
+        NSColor.windowBackgroundColor.withAlphaComponent(reduceTransparency ? 1 : 0.94).setFill()
+        NSBezierPath(roundedRect: box, xRadius: Style.chipRadius + 2, yRadius: Style.chipRadius + 2).fill()
         NSGraphicsContext.restoreGraphicsState()
 
-        Style.tileBorder.setStroke()
-        let border = NSBezierPath(roundedRect: box.insetBy(dx: 0.5, dy: 0.5), xRadius: 7, yRadius: 7)
+        tileBorderColor.setStroke()
+        let border = NSBezierPath(
+            roundedRect: box.insetBy(dx: 0.5, dy: 0.5),
+            xRadius: Style.chipRadius + 2,
+            yRadius: Style.chipRadius + 2
+        )
         border.lineWidth = 1
         border.stroke()
 
@@ -1841,6 +2107,11 @@ private final class MissionControlView: NSView {
     // pointer tracking.
     private func startTooltipAnimation() {
         tooltipTimer?.invalidate()
+        if reduceMotion {
+            tooltipProgress = 1
+            needsDisplay = true
+            return
+        }
         tooltipProgress = 0
         let start = Date()
         let duration = 0.14
@@ -1882,28 +2153,31 @@ private final class MissionControlView: NSView {
         let isFocused = workspace == focusedWorkspace
         let isDropTarget = draggedWindow != nil && didDrag && dragTargetWorkspace == workspace
 
-        let path = NSBezierPath(roundedRect: rect, xRadius: Style.tileRadius, yRadius: Style.tileRadius)
-        (windows.isEmpty ? Style.tileFillEmpty : Style.tileFill).setFill()
+        let path = NSBezierPath(roundedRect: rect, xRadius: tileRadius, yRadius: tileRadius)
+        tileFill(empty: windows.isEmpty).setFill()
         path.fill()
         if isFocused {
-            Style.tileFocusFill.setFill()
+            selectionFill.setFill()
+            path.fill()
+        } else if isDropTarget {
+            selectionFill.withAlphaComponent(0.28).setFill()
             path.fill()
         }
 
-        Style.tileBorder.setStroke()
-        let border = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: Style.tileRadius, yRadius: Style.tileRadius)
-        border.lineWidth = 1
+        tileBorderColor.setStroke()
+        let border = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: tileRadius, yRadius: tileRadius)
+        border.lineWidth = increaseContrast ? max(1.5, config.missionTileBorderWidth) : config.missionTileBorderWidth
         border.stroke()
 
         drawWorkspaceLabel(workspace, windows: windows, in: rect)
 
         if isFocused || isDropTarget {
-            (isDropTarget ? Style.accent.withAlphaComponent(0.9) : Style.accent).setStroke()
-            let ringWidth: CGFloat = isDropTarget ? 2 : 2.5
+            selectionBorder.setStroke()
+            let ringWidth: CGFloat = increaseContrast ? 3.5 : (isDropTarget ? 2.5 : 2)
             let ring = NSBezierPath(
                 roundedRect: rect.insetBy(dx: ringWidth / 2, dy: ringWidth / 2),
-                xRadius: Style.tileRadius - 0.5,
-                yRadius: Style.tileRadius - 0.5
+                xRadius: max(0, tileRadius - 0.5),
+                yRadius: max(0, tileRadius - 0.5)
             )
             ring.lineWidth = ringWidth
             ring.stroke()
@@ -1941,7 +2215,7 @@ private final class MissionControlView: NSView {
                     in: NSRect(x: tx, y: last.maxY + Style.rowGap + (Style.rowHeight - 13) / 2, width: 28, height: 13),
                     withAttributes: [
                         .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
-                        .foregroundColor: Style.titleText,
+                        .foregroundColor: secondaryTextColor,
                     ]
                 )
             }
@@ -1954,11 +2228,20 @@ private final class MissionControlView: NSView {
 
         let x = tileRect.minX + Style.pad
         let width = max(0, tileRect.width - Style.pad * 2)
-        let top = tileRect.minY + Style.pad
-        let bottom = tileRect.maxY - Style.pad
+        let regionTop = tileRect.minY + Style.pad
+        let regionBottom = tileRect.maxY - Style.pad
         let unit = Style.rowHeight + Style.rowGap
-        let capacity = max(1, Int((bottom - top + Style.rowGap) / unit))
+        let capacity = max(1, Int((regionBottom - regionTop + Style.rowGap) / unit))
         let shown = windows.count > capacity ? max(1, capacity - 1) : windows.count
+
+        // Center the content block (rows + a trailing overflow-strip band when
+        // some windows spill over) in the tile so a sparse workspace doesn't
+        // cluster its rows at the top with dead space below.
+        let hasOverflow = windows.count > shown
+        let contentHeight = CGFloat(shown) * Style.rowHeight
+            + CGFloat(max(0, shown - 1)) * Style.rowGap
+            + (hasOverflow ? unit : 0)
+        let top = regionTop + max(0, (regionBottom - regionTop - contentHeight) / 2)
 
         return windows.prefix(shown).enumerated().map { index, window in
             let y = top + CGFloat(index) * unit
@@ -1991,18 +2274,38 @@ private final class MissionControlView: NSView {
             NSGraphicsContext.current?.cgContext.setAlpha(0.3)
         }
 
-        // A list row like the macOS app switcher: icon · app name · dim title.
-        // No pill, except when floating as a drag preview (an accent card).
-        if isFloating {
-            let card = NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6)
-            Style.accent.withAlphaComponent(0.92).setFill()
-            card.fill()
+        // Content rows stay visually quiet on the glass plane. Hover lifts a
+        // row with a thin semantic fill; dragging uses restrained accent tint.
+        let isHovered = !isFloating && hoveredWindowID == window.windowID
+        let usesDarkSurface = isFloating || window.workspace == focusedWorkspace
+        if isFloating || isHovered {
+            let card = NSBezierPath(roundedRect: rect, xRadius: Style.chipRadius, yRadius: Style.chipRadius)
+            if isFloating {
+                NSGraphicsContext.saveGraphicsState()
+                let shadow = NSShadow()
+                shadow.shadowColor = NSColor.shadowColor.withAlphaComponent(0.32)
+                shadow.shadowBlurRadius = 14
+                shadow.shadowOffset = NSSize(width: 0, height: -4)
+                shadow.set()
+                selectionFill.setFill()
+                card.fill()
+                NSGraphicsContext.restoreGraphicsState()
+            } else {
+                (usesDarkSurface ? selectionText.withAlphaComponent(0.09) : config.missionHoverColor).setFill()
+                card.fill()
+            }
+
+            if isFloating {
+                selectionBorder.setStroke()
+                card.lineWidth = 1
+                card.stroke()
+            }
         }
 
-        let iconSide = min(rect.height - 4, 18)
-        var textX = rect.minX + 2
+        let iconSide = min(rect.height - 4, 19)
+        var textX = rect.minX + (isFloating ? 6 : 2)
         if let icon = appIcon(bundleID: window.bundleID) {
-            let iconRect = NSRect(x: rect.minX + 2, y: rect.minY + (rect.height - iconSide) / 2, width: iconSide, height: iconSide)
+            let iconRect = NSRect(x: textX, y: rect.minY + (rect.height - iconSide) / 2, width: iconSide, height: iconSide)
             icon.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1.0, respectFlipped: true, hints: nil)
             textX = iconRect.maxX + 7
         }
@@ -2012,7 +2315,7 @@ private final class MissionControlView: NSView {
             string: name,
             attributes: [
                 .font: NSFont.systemFont(ofSize: 11.5, weight: .medium),
-                .foregroundColor: isFloating ? NSColor.white : Style.appText,
+                .foregroundColor: usesDarkSurface ? selectionText : primaryTextColor,
             ]
         )
         let title = chipTitle(for: window)
@@ -2021,7 +2324,7 @@ private final class MissionControlView: NSView {
                 string: name.isEmpty ? title : "  " + title,
                 attributes: [
                     .font: NSFont.systemFont(ofSize: 11, weight: .regular),
-                    .foregroundColor: isFloating ? NSColor.white.withAlphaComponent(0.8) : Style.titleText,
+                    .foregroundColor: usesDarkSurface ? selectionSecondaryText : secondaryTextColor,
                 ]
             ))
         }
@@ -2064,8 +2367,8 @@ private final class MissionControlView: NSView {
         // Mark the lifted lane.
         let sourceY = metrics.gridRect.minY + CGFloat(sourceIndex) * unit
         let sourceBand = NSRect(x: config.margin, y: sourceY, width: bounds.width - config.margin * 2, height: metrics.tileHeight)
-        Style.accent.withAlphaComponent(0.10).setFill()
-        NSBezierPath(roundedRect: sourceBand, xRadius: Style.tileRadius, yRadius: Style.tileRadius).fill()
+        selectionFill.withAlphaComponent(0.14).setFill()
+        NSBezierPath(roundedRect: sourceBand, xRadius: tileRadius, yRadius: tileRadius).fill()
 
         // Insertion line: above the target when moving up, below when moving down.
         let boundaryIndex = targetIndex <= sourceIndex ? targetIndex : targetIndex + 1
@@ -2074,36 +2377,36 @@ private final class MissionControlView: NSView {
         line.move(to: NSPoint(x: config.margin, y: lineY))
         line.line(to: NSPoint(x: metrics.gridRect.maxX, y: lineY))
         line.lineWidth = 2.5
-        Style.accent.setStroke()
+        selectionBorder.setStroke()
         line.stroke()
     }
 
-    // Vertical project-lane name in the left rail. The text is rendered upright
-    // into an image, then rotated 90° so it reads bottom-to-top down the rail.
-    // (Flip the rotation sign if it should read top-to-bottom.)
-    private func drawRowName(_ name: String, in rect: NSRect) {
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
-            .foregroundColor: Style.appText.withAlphaComponent(0.85),
+    // Project-lane names stay plain and vertical: no number, pill, or placeholder
+    // chrome. Weight alone distinguishes the focused lane.
+    private func drawRowName(_ name: String, row: Int, in rect: NSRect) {
+        let focused = workspaceRow(focusedWorkspace) == row
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11, weight: focused ? .semibold : .medium),
+            .foregroundColor: config.missionRowTextColor,
         ]
-        let ns = name as NSString
-
-        // Rotated text runs along the row's height, so cap its length there.
-        let maxLength = max(8, rect.height - 8)
-        var size = ns.size(withAttributes: attrs)
-        let width = ceil(min(size.width, maxLength))
-        let height = ceil(size.height)
-        guard width > 0, height > 0 else { return }
-        size = NSSize(width: width, height: height)
-
-        let image = NSImage(size: size)
-        image.lockFocus()
+        let label = name as NSString
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .center
         paragraph.lineBreakMode = .byTruncatingTail
-        var imageAttrs = attrs
-        imageAttrs[.paragraphStyle] = paragraph
-        ns.draw(in: NSRect(origin: .zero, size: size), withAttributes: imageAttrs)
+        var imageAttributes = attributes
+        imageAttributes[.paragraphStyle] = paragraph
+
+        let naturalSize = label.size(withAttributes: attributes)
+        let width = ceil(min(naturalSize.width, max(8, rect.height - 10)))
+        let height = ceil(naturalSize.height)
+        guard width > 0, height > 0 else { return }
+
+        let image = NSImage(size: NSSize(width: width, height: height))
+        image.lockFocus()
+        label.draw(
+            in: NSRect(x: 0, y: 0, width: width, height: height),
+            withAttributes: imageAttributes
+        )
         image.unlockFocus()
 
         guard let context = NSGraphicsContext.current?.cgContext else { return }
@@ -2114,7 +2417,7 @@ private final class MissionControlView: NSView {
             in: NSRect(x: -width / 2, y: -height / 2, width: width, height: height),
             from: .zero,
             operation: .sourceOver,
-            fraction: 1.0,
+            fraction: 1,
             respectFlipped: true,
             hints: nil
         )
@@ -2239,9 +2542,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }()
     private var panel: NSPanel?
     private var missionPanel: NSPanel?
+    private var missionGlassView: NSGlassEffectView?
     private var stateTimer: Timer?
     private var focusedTimer: Timer?
     private var windowsTimer: Timer?
+    private var configTimer: Timer?
+    private var lastConfigModificationDate: Date?
     private var hideTimer: Timer?
     private var focusedPollInFlight = false
     private var windowsPollInFlight = false
@@ -2282,6 +2588,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         missionView.onWindowMove = { [weak self] window, workspace in
             self?.move(window: window, to: workspace)
+        }
+        missionView.onInsertWorkspace = { [weak self] workspace, position in
+            self?.insertWorkspaceGap(around: workspace, position: position)
         }
         missionView.onReloadConfig = { [weak self] in
             self?.reloadConfig()
@@ -2336,6 +2645,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         windowsTimer = Timer.scheduledTimer(withTimeInterval: windowsPollInterval, repeats: true) { [weak self] _ in
             self?.pollWindows()
         }
+        lastConfigModificationDate = HudConfig.modificationDate()
+        configTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: true) { [weak self] _ in
+            self?.pollConfigFile()
+        }
 
         setupStatusItem()
     }
@@ -2377,30 +2690,29 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.alphaValue = 1.0
-        panel.hasShadow = true
+        panel.alphaValue = config.missionPanelOpacity
+        // NSGlassEffectView supplies its own material depth. NSWindow's legacy
+        // rectangular shadow leaks through rounded corners, so keep it disabled.
+        panel.hasShadow = false
         panel.level = .statusBar
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
 
-        // Native dark vibrancy blur behind the grid, with rounded corners + a
-        // hairline edge — the macOS Mission Control / Control Center look.
-        let blur = NSVisualEffectView(frame: NSRect(origin: .zero, size: panel.frame.size))
-        blur.material = .hudWindow
-        blur.blendingMode = .behindWindow
-        blur.state = .active
-        blur.appearance = NSAppearance(named: .vibrantDark)
-        blur.wantsLayer = true
-        blur.layer?.cornerRadius = MissionControlView.Style.panelRadius
-        blur.layer?.masksToBounds = true
-        blur.layer?.borderWidth = 0.5
-        blur.layer?.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
-        blur.autoresizingMask = [.width, .height]
+        // Clear Liquid Glass exposes lensing/refraction instead of reading as a
+        // conventional blur. Native dark tint adds separation without covering
+        // underlying content or stacking another material layer.
+        let container = NSView(frame: NSRect(origin: .zero, size: panel.frame.size))
+        container.autoresizingMask = [.width, .height]
 
-        missionView.frame = blur.bounds
+        let glass = NSGlassEffectView(frame: container.bounds)
+        glass.autoresizingMask = [.width, .height]
+        configureMissionGlass(glass)
+
+        missionView.frame = container.bounds
         missionView.autoresizingMask = [.width, .height]
-        blur.addSubview(missionView)
+        container.addSubview(glass)
+        container.addSubview(missionView)
 
-        panel.contentView = blur
+        panel.contentView = container
         panel.orderOut(nil)
 
         // Persist user move/resize so a hand-tuned size survives toggling.
@@ -2413,7 +2725,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             )
         }
 
+        self.missionGlassView = glass
         self.missionPanel = panel
+    }
+
+    private func configureMissionGlass(_ glass: NSGlassEffectView) {
+        glass.style = config.missionGlassStyle == "regular" ? .regular : .clear
+        glass.cornerRadius = config.missionGlassCornerRadius
+        glass.tintColor = config.missionGlassTintColor.withAlphaComponent(config.missionGlassTintOpacity)
+        glass.clipsToBounds = true
     }
 
     @objc private func missionFrameChanged(_ notification: Notification) {
@@ -2545,6 +2865,134 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.missionView.rowNames = originalNames
                     self.saveRowNames(originalNames)
                     _ = self.updateVisibleGrid()
+                }
+                self.pollWindows()
+            }
+        }
+    }
+
+    // Insert an empty workspace slot inside one project lane. AeroSpace has no
+    // persistent empty-workspace object, so every populated workspace at the
+    // insertion column and to its right moves one column. That leaves a stable
+    // interior gap while keeping all other project lanes untouched.
+    private func insertWorkspaceGap(
+        around anchorWorkspace: String,
+        position: WorkspaceInsertionPosition
+    ) {
+        guard let row = workspaceRow(anchorWorkspace),
+              let anchorColumn = workspaceColumn(anchorWorkspace)
+        else { return }
+
+        let insertionColumn = anchorColumn + (position == .after ? 1 : 0)
+        guard 0..<workspaceCols ~= insertionColumn else { return }
+
+        let snapshot = view.windowsByWorkspace
+        let affectedColumns = snapshot.compactMap { workspace, windows -> Int? in
+            guard !windows.isEmpty,
+                  workspaceRow(workspace) == row,
+                  let column = workspaceColumn(workspace),
+                  column >= insertionColumn
+            else { return nil }
+            return column
+        }
+
+        // No populated suffix means no remap is needed. Reveal one transient
+        // edge cell, matching the existing edge-plus behavior.
+        guard let lastOccupiedColumn = affectedColumns.max() else {
+            missionView.revealWorkspaceColumn(insertionColumn)
+            return
+        }
+        guard lastOccupiedColumn < workspaceCols - 1 else {
+            NSSound.beep()
+            return
+        }
+
+        var optimistic: [String: [WorkspaceWindow]] = [:]
+        var moves: [(window: WorkspaceWindow, target: String)] = []
+        for (workspace, windows) in snapshot {
+            guard workspaceRow(workspace) == row,
+                  let column = workspaceColumn(workspace),
+                  column >= insertionColumn
+            else {
+                optimistic[workspace, default: []].append(contentsOf: windows)
+                continue
+            }
+
+            let target = workspaceName(row: row, col: column + 1)
+            for window in windows {
+                optimistic[target, default: []].append(window.moved(to: target))
+                moves.append((window, target))
+            }
+        }
+        for workspace in optimistic.keys {
+            optimistic[workspace] = optimistic[workspace]?.sorted {
+                if $0.appName == $1.appName { return $0.windowID < $1.windowID }
+                return $0.appName.localizedCaseInsensitiveCompare($1.appName) == .orderedAscending
+            }
+        }
+
+        // Move rightmost workspaces first so destinations are vacated before
+        // their left-hand neighbors arrive.
+        moves.sort {
+            let leftColumn = workspaceColumn($0.window.workspace) ?? 0
+            let rightColumn = workspaceColumn($1.window.workspace) ?? 0
+            if leftColumn != rightColumn { return leftColumn > rightColumn }
+            return $0.window.windowID < $1.window.windowID
+        }
+
+        let originalFocusedWorkspace = view.focusedWorkspace
+        var shiftedFocusedWorkspace = originalFocusedWorkspace
+        if snapshot[originalFocusedWorkspace]?.isEmpty == false,
+           workspaceRow(originalFocusedWorkspace) == row,
+           let focusedColumn = workspaceColumn(originalFocusedWorkspace),
+           focusedColumn >= insertionColumn
+        {
+            shiftedFocusedWorkspace = workspaceName(row: row, col: focusedColumn + 1)
+        }
+
+        view.windowsByWorkspace = optimistic
+        missionView.windowsByWorkspace = optimistic
+        setFocusedWorkspace(shiftedFocusedWorkspace, showMiniHud: false)
+        let optimisticGrid = missionControlGrid()
+        missionView.setGrid(rows: optimisticGrid.rows, cols: optimisticGrid.cols)
+        missionView.revealWorkspaceColumn(insertionColumn)
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+
+            var completed: [(window: WorkspaceWindow, target: String)] = []
+            var succeeded = true
+            for move in moves {
+                if self.aerospace.moveWindow(move.window, to: move.target) {
+                    completed.append(move)
+                } else {
+                    succeeded = false
+                    break
+                }
+            }
+
+            // Best-effort rollback keeps partially completed suffix moves from
+            // leaving user windows merged into destination workspaces.
+            if !succeeded {
+                for move in completed.reversed() {
+                    _ = self.aerospace.moveWindow(move.window, to: move.window.workspace)
+                }
+            } else if shiftedFocusedWorkspace != originalFocusedWorkspace {
+                self.aerospace.switchWorkspace(shiftedFocusedWorkspace)
+            }
+
+            DispatchQueue.main.async {
+                if succeeded {
+                    if shiftedFocusedWorkspace != originalFocusedWorkspace {
+                        self.setFocusedWorkspace(shiftedFocusedWorkspace, showMiniHud: false)
+                        self.writeFocusedState(shiftedFocusedWorkspace)
+                    }
+                } else {
+                    self.view.windowsByWorkspace = snapshot
+                    self.missionView.windowsByWorkspace = snapshot
+                    self.setFocusedWorkspace(originalFocusedWorkspace, showMiniHud: false)
+                    let restoredGrid = self.missionControlGrid()
+                    self.missionView.setGrid(rows: restoredGrid.rows, cols: restoredGrid.cols)
                 }
                 self.pollWindows()
             }
@@ -2845,8 +3293,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         return next
     }
 
-    private func reloadConfig() {
+    private func pollConfigFile() {
+        guard let modified = HudConfig.modificationDate() else { return }
+        guard let previous = lastConfigModificationDate else {
+            lastConfigModificationDate = modified
+            return
+        }
+        guard modified != previous else { return }
+        lastConfigModificationDate = modified
+        reloadConfig(showMiniHud: false)
+    }
+
+    private func reloadConfig(showMiniHud: Bool = true) {
         config = HudConfig.load()
+        lastConfigModificationDate = HudConfig.modificationDate()
         view.config = config
         missionView.config = config
 
@@ -2854,17 +3314,22 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             panel.alphaValue = config.opacity
             panel.hasShadow = config.shadowEnabled
             resizePanel(rows: view.visibleRows, cols: view.visibleCols)
-            panel.orderFrontRegardless()
+            if showMiniHud {
+                panel.orderFrontRegardless()
+            }
         }
         if let missionPanel {
+            if let missionGlassView {
+                configureMissionGlass(missionGlassView)
+            }
             let grid = missionControlGrid()
             missionView.setGrid(rows: grid.rows, cols: grid.cols)
             let frame = savedMissionFrame() ?? missionControlFrame(rows: grid.rows.count, cols: grid.cols.count)
             suppressMissionFrameSave = true
             missionPanel.setFrame(frame, display: true)
             suppressMissionFrameSave = false
-            missionPanel.alphaValue = 1.0
-            missionPanel.hasShadow = true
+            missionPanel.alphaValue = config.missionPanelOpacity
+            missionPanel.hasShadow = false
         }
 
         updateStatusItemVisibility()

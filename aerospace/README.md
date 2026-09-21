@@ -89,8 +89,14 @@ exists anywhere in it. Empty intersections inside that active grid remain visibl
 as translucent drop targets. Drag an app/window chip from one tile to another to
 move that window without switching focus. Hover an edge for the `+` button, then
 click it to add one empty row or column without jumping to that workspace. Use
+the context menu on a tile to add a workspace before or after it; populated
+workspaces to its right shift one column within that project lane. Use
 `w`/`a`/`s`/`d` or arrow keys to navigate, `Enter`/`Space` to focus the selected
 workspace and close Mission Control, and `Esc` to close it without switching.
+On macOS 26 it uses native Clear Liquid Glass with subtle dark tint as one lensing
+navigation plane. Workspace tiles and window rows remain content fills; project
+names stay plain and vertical. Rounded glass clips the complete panel with no
+rectangular window shadow behind it.
 
 See [hud/README.md](hud/README.md) for controls, troubleshooting, and best
 practices.
@@ -100,6 +106,10 @@ HUD appearance is configured in:
 ```bash
 aerospace/hud/config.toml
 ```
+
+`[mission_control]` controls native glass style, corner radius, glass background
+tint, accent, and accent text color. HUD menu -> `Reload Config` applies changes
+live without rebuilding. Saving the file also reloads it automatically.
 
 Edit that file, then right-click the HUD and choose `Reload Config`.
 

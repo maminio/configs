@@ -7,6 +7,7 @@ import sys
 
 SOURCE = Path(__file__).resolve().parents[1] / "AeroSpaceHud.swift"
 swift = SOURCE.read_text()
+config_text = (SOURCE.parent / "config.toml").read_text()
 
 
 def function_body(name: str) -> str:
@@ -85,16 +86,117 @@ def test_plus_click_does_not_fall_through_to_workspace_click() -> None:
     assert "if suppressWorkspaceClickOnMouseUp { return }" in swift, "Consumed plus-click mouseUp should not jump workspace"
 
 
+def test_right_click_can_add_workspace_before_or_after() -> None:
+    mission_source = swift[swift.index("private final class MissionControlView"):]
+    can_insert = function_body("canInsertWorkspace")
+
+    assert 'title: "Add Workspace Before"' in mission_source, "Tile menu should offer insertion before its workspace"
+    assert 'title: "Add Workspace After"' in mission_source, "Tile menu should offer insertion after its workspace"
+    assert "beforeItem.representedObject = workspace" in mission_source, "Before action should retain the clicked workspace"
+    assert "afterItem.representedObject = workspace" in mission_source, "After action should retain the clicked workspace"
+    assert "canInsertWorkspace(around: workspace, position: .before)" in mission_source, "Before action should enforce grid capacity"
+    assert "canInsertWorkspace(around: workspace, position: .after)" in mission_source, "After action should enforce grid capacity"
+    assert "if let workspace = workspace(at: point)" in mission_source, "Insertion actions should appear only for a workspace tile"
+    assert "(occupiedColumns.max() ?? insertionColumn) < workspaceCols - 1" in can_insert, (
+        "Insertion should disable when shifting would overflow column 9"
+    )
+
+
+def test_workspace_insertion_shifts_only_same_lane_suffix() -> None:
+    body = function_body("insertWorkspaceGap")
+
+    assert "workspaceRow(workspace) == row" in body, "Insertion should leave other project lanes untouched"
+    assert "column >= insertionColumn" in body, "Insertion should shift only workspaces at and after the new slot"
+    assert "workspaceName(row: row, col: column + 1)" in body, "Affected workspaces should move one column right"
+    assert "lastOccupiedColumn < workspaceCols - 1" in body, "Insertion must prevent workspace overflow"
+    assert "moves.sort" in body and "leftColumn > rightColumn" in body, "Rightmost workspaces should move first"
+    assert "completed.reversed()" in body, "Partial failures should roll completed moves back"
+    assert "revealWorkspaceColumn(insertionColumn)" in body, "New empty slot should remain visible after remapping"
+    assert "shiftedFocusedWorkspace" in body, "Focus should follow a populated workspace that shifts"
+
+
 def test_empty_cells_are_visible_drop_targets() -> None:
     body = function_body("isCellVisible")
     assert body.strip() == "true", "Every active-row/active-column cell should be drawn and hit-testable"
 
 
 def test_empty_tiles_are_subtle_but_visible() -> None:
-    occupied = alpha("tileFill")
-    empty = alpha("tileFillEmpty")
-    assert 0 < empty < occupied, "Empty tiles should be more transparent than occupied tiles"
-    assert empty >= occupied * 0.55, "Empty tiles should remain visible enough to target"
+    assert "empty ? config.missionEmptyTileColor : config.missionTileColor" in swift, "Tile fills should come from Mission Control config"
+    assert "empty ? 0.58 : 0.82" in swift, "Reduced Transparency should retain stronger tile separation"
+
+
+def test_mission_control_uses_native_liquid_glass() -> None:
+    panel_body = function_body("createMissionPanel")
+    glass_body = function_body("configureMissionGlass")
+    reload_start = swift.index("private func reloadConfig(showMiniHud: Bool = true)")
+    reload_end = swift.index("private func updateVisibleGrid", reload_start)
+    reload_body = swift[reload_start:reload_end]
+
+    assert "NSGlassEffectView" in panel_body, "Mission Control should use native AppKit Liquid Glass"
+    assert 'config.missionGlassStyle == "regular" ? .regular : .clear' in glass_body, "Glass style should come from config"
+    assert "config.missionGlassTintColor.withAlphaComponent(config.missionGlassTintOpacity)" in glass_body, "Native glass tint and opacity should come from config"
+    assert "glass.cornerRadius = config.missionGlassCornerRadius" in glass_body, "Glass radius should come from config"
+    assert "container.addSubview(glass)" in panel_body, "Native glass should form the background layer"
+    assert "container.addSubview(missionView)" in panel_body, "Configured content should render above glass without color remapping"
+    assert "glass.contentView = missionView" not in panel_body, "Custom colors must not be embedded in adaptive glass content"
+    assert "panel.hasShadow = false" in panel_body, "Rectangular NSWindow shadow must not leak behind rounded glass"
+    assert "glass.clipsToBounds = true" in glass_body, "Glass content should clip to rounded material bounds"
+    assert "glass.wantsLayer" not in glass_body, "Custom layer backing must not flatten native glass rendering"
+    assert "configureMissionGlass(missionGlassView)" in reload_body, "Reload Config should update live glass attributes"
+    assert "missionPanel.hasShadow = false" in reload_body, "Reload Config must preserve rounded glass edges"
+    assert "NSVisualEffectView" not in panel_body, "Legacy vibrancy blur should not back Mission Control"
+    assert "vibrantDark" not in panel_body, "Liquid Glass should adapt instead of forcing dark appearance"
+
+
+def test_mission_control_glass_tokens_are_configurable() -> None:
+    assert "[mission_control]" in config_text, "Config should expose a Mission Control section"
+    assert 'glass_style = "clear"' in config_text, "Config should expose Clear or Regular glass style"
+    assert "corner_radius = 30" in config_text, "Config should expose glass corner radius"
+    assert "glass_tint_color =" in config_text, "Config should expose native glass tint"
+    assert "glass_tint_opacity =" in config_text, "Config should expose native glass tint strength"
+    assert "background_color =" in config_text, "Config should expose deterministic background color inside glass"
+    assert "background_opacity =" in config_text, "Config should expose deterministic background strength"
+    assert "panel_opacity =" in config_text, "Config should expose whole-panel opacity"
+    assert "tile_color =" in config_text, "Config should expose occupied tile fill"
+    assert "empty_tile_color =" in config_text, "Config should expose empty tile fill"
+    assert "tile_border_color =" in config_text, "Config should expose tile border color"
+    assert "tile_border_width =" in config_text, "Config should expose tile border width"
+    assert "tile_corner_radius =" in config_text, "Config should expose tile corner radius"
+    assert "hover_color =" in config_text, "Config should expose window hover feedback"
+    assert "accent_color =" in config_text, "Config should expose Mission Control accent"
+    assert "accent_border_color =" in config_text, "Config should expose accent outline"
+    assert "accent_text_color =" in config_text, "Config should expose accent text contrast"
+    assert "primary_text_color =" in config_text, "Config should expose primary text"
+    assert "secondary_text_color =" in config_text, "Config should expose secondary text"
+    assert "row_text_color =" in config_text, "Config should expose vertical row text"
+    assert 'values["mission_control.\\(key)"] = value' in swift, "Parser should load Mission Control section values"
+    assert 'values.color("mission_control.accent_color")' in swift, "HUD config should parse Mission Control accent"
+    assert "config.missionBackgroundColor" in swift and ".withAlphaComponent(config.missionBackgroundOpacity)" in swift, (
+        "Mission Control should draw configured background inside native glass"
+    )
+    assert "HudConfig.modificationDate()" in swift, "HUD should monitor active config file"
+    assert "reloadConfig(showMiniHud: false)" in swift, "Saving config should update Mission Control automatically"
+
+
+def test_liquid_glass_content_hierarchy_and_accessibility() -> None:
+    row_body = function_body("drawRowName")
+    tooltip_animation = function_body("startTooltipAnimation")
+
+    assert "NSColor.labelColor" in swift, "Mission content should use adaptive semantic colors"
+    assert "NSColor.secondaryLabelColor" in swift, "Secondary labels should adapt with system appearance"
+    assert "override var allowsVibrancy: Bool { false }" in swift, "Configured colors should not be remapped by glass vibrancy"
+    assert "drawWorkspaceIdentifier(workspace, focused: isFocused" in swift, "Each tile should expose its workspace identity"
+    assert "context.rotate(by: -.pi / 2)" in row_body, "Project-lane labels should remain vertical"
+    assert "roundedRect" not in row_body, "Project-lane labels should not sit inside pills"
+    assert 'let number = "\\(row)"' not in row_body, "Project-lane labels should not show row numbers"
+    assert ".foregroundColor: config.missionRowTextColor" in row_body, "Row text should preserve configured color and alpha exactly"
+    assert "calibratedWhite: 0.04, alpha: 0.78" in swift, "Selection should use clear dark neutral emphasis"
+    assert "hoveredWindowID" in swift, "Window rows should expose pointer feedback"
+    assert "accessibilityDisplayShouldIncreaseContrast" in swift, "Custom drawing should honor Increase Contrast"
+    assert "accessibilityDisplayShouldReduceTransparency" in swift, "Custom drawing should honor Reduce Transparency"
+    assert "accessibilityDisplayShouldReduceMotion" in swift, "Custom motion should honor Reduce Motion"
+    assert "accessibilityDisplayOptionsDidChangeNotification" in swift, "Accessibility changes should redraw live"
+    assert "if reduceMotion" in tooltip_animation, "Tooltip motion should stop when Reduce Motion is enabled"
 
 
 def test_mission_control_keyboard_controls() -> None:
@@ -149,8 +251,13 @@ if __name__ == "__main__":
         test_sparse_active_grid_maps_rows_and_columns,
         test_edge_plus_expands_sparse_active_grid,
         test_plus_click_does_not_fall_through_to_workspace_click,
+        test_right_click_can_add_workspace_before_or_after,
+        test_workspace_insertion_shifts_only_same_lane_suffix,
         test_empty_cells_are_visible_drop_targets,
         test_empty_tiles_are_subtle_but_visible,
+        test_mission_control_uses_native_liquid_glass,
+        test_mission_control_glass_tokens_are_configurable,
+        test_liquid_glass_content_hierarchy_and_accessibility,
         test_mission_control_keyboard_controls,
         test_mission_control_dismisses_before_focusing_window,
     ):

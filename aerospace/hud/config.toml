@@ -50,6 +50,37 @@ header_text_color = "#f5f7e6fa"
 workspace_text_color = "#f2f5e8fa"
 app_text_color = "#f5f7edeb"
 
+# Native macOS 26 Liquid Glass used by Mission Control.
+[mission_control]
+# "clear" emphasizes lensing; "regular" is frostier and more adaptive.
+glass_style = "clear"
+corner_radius = 15
+panel_opacity = 1.0
+glass_tint_color = "#a2a2a2"
+glass_tint_opacity = 0.5
+
+# Exact color layer inside native glass. Lower opacity preserves more lensing.
+background_color = "#6a6a6a98"
+background_opacity = 0.62
+
+# Workspace content drawn inside the single glass plane.
+tile_color = "#ffffff12"
+empty_tile_color = "#ffffff12"
+tile_border_color = "#fff8f8"
+tile_border_width = 0.2
+tile_corner_radius = 15
+hover_color = "#ce212114"
+
+# Focused workspace, drop targets, drag previews, and edge + action.
+accent_color = "#0a0a0ac7"
+accent_border_color = "#050505ff"
+accent_text_color = "#f5f5f5ff"
+
+# Unselected labels and window rows.
+primary_text_color = "#ffffff"
+secondary_text_color = "#ffffff"
+row_text_color = "#ffffff"
+
 # Rename or hide app labels. Key = the real app name (case-insensitive),
 # value = what to show. Empty string hides the label (icon still shows).
 # Real names searchable; only the displayed text changes.

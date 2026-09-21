@@ -60,6 +60,9 @@ It does not support drag-to-move windows. That is reserved for Mission Control.
 It supports:
 
 - Click workspace tile: switch to that workspace and close Mission Control.
+- Right-click a workspace tile, then choose `Add Workspace Before` or
+  `Add Workspace After`: insert an empty slot in that project lane and shift
+  populated workspaces to its right one column.
 - Drag app/window chip to any tile, including empty translucent cells: move
   that AeroSpace window to the target workspace.
 - Press `w`/`a`/`s`/`d` or an arrow key: switch to the adjacent visible
@@ -76,6 +79,23 @@ only active rows and active columns. A row or column is active when at least one
 workspace in it has an app. Empty intersections inside that active grid remain
 visible as translucent drop targets.
 
+Mission Control follows Apple's Liquid Glass hierarchy on macOS 26:
+
+- One native `NSGlassEffectView` with Clear style forms the lensing navigation
+  plane. A restrained dark native tint improves separation without covering the
+  content behind it.
+- Workspace tiles, project-lane labels, window rows, and tooltips use semantic
+  fills and vibrancy as content inside that plane. Glass is never stacked on glass.
+- Project-lane names remain plain and vertical, with no row number, pill, or
+  placeholder chrome. Workspace identifiers are plain text.
+- Current focus, drop targets, drag previews, and the edge `+` action use one dark
+  neutral emphasis instead of the system accent color.
+- Native panel shadow is disabled and glass content is clipped with continuous
+  corners so no sharp rectangular backing appears behind the rounded material.
+- Semantic colors adapt to light/dark context. Custom drawing listens for macOS
+  accessibility display changes and honors Reduce Transparency, Increase Contrast,
+  and Reduce Motion.
+
 Mission Control grid contract:
 
 - Initial rows: sorted row numbers that contain at least one window.
@@ -85,6 +105,9 @@ Mission Control grid contract:
 - Empty cells inside that cross-product are drawn with lower opacity and remain
   valid click/drop targets.
 - Edge `+` expansion adds one adjacent empty row or column to the visible grid.
+- Context-menu insertion affects only the clicked project lane. It moves the
+  populated suffix rightmost-first, preserves focus on shifted content, and is
+  disabled when column 9 leaves no capacity.
 - Clicking the `+` consumes that mouse interaction; it must not switch to the
   newly added workspace.
 - Closing and reopening Mission Control recomputes the active grid from the
@@ -199,6 +222,20 @@ The app creates two panels:
 - Mission Control panel, centered and sized to about 70% of the screen
 
 Both panels share window inventory and focused workspace state.
+Mission Control's panel content is a native macOS 26 `NSGlassEffectView` using
+Clear style and restrained dark tint; the compact HUD keeps its independent
+configurable appearance.
+
+Mission Control glass tokens live under `[mission_control]` in
+`aerospace/hud/config.toml`. Native glass exposes style, corner radius, background
+tint, and tint opacity. Content-layer tokens expose panel opacity, tile colors,
+tile border/shape, hover, accent fill/border/text, primary/secondary text, and row
+text. Exact background color is a separate content layer inside native glass,
+because AppKit tint adapts rather than guaranteeing literal color output. A 350ms
+file watcher applies saves automatically; Reload Config remains available. Reload
+keeps the rectangular `NSPanel` shadow disabled.
+`MissionControlView` is a sibling overlay above `NSGlassEffectView`, not its
+`contentView`, so TOML colors remain literal while glass still provides lensing.
 
 ### Native App Switcher
 

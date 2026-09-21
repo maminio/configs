@@ -50,11 +50,21 @@ workspace, displays compact app names per workspace, and supports click-to-jump.
 - Current workspace highlight
 - Compact app names in each HUD tile
 - Separate 70%-screen Mission Control panel with active rows and columns
+- Native macOS 26 Clear Liquid Glass with restrained dark tint
+- Adaptive semantic tile, project-lane, window-row, and tooltip colors
+- Plain vertical project-lane names and visible workspace identifiers
+- Continuous rounded clipping with no rectangular panel shadow
+- Live Reduce Transparency, Increase Contrast, and Reduce Motion support
 - Empty cells inside active row/column intersections are translucent drop targets
 - Click tile to jump to that workspace
 - `w`/`a`/`s`/`d` or arrow-key navigation between visible Mission Control tiles
 - `Enter`/`Space` focuses the selected workspace; `Esc` closes Mission Control
 - Fast highlight updates through `/tmp/aerospace-hud-focused-workspace`
+
+Mission Control uses one Clear `NSGlassEffectView` rather than layered blur cards.
+Its tiles and controls are content-layer fills inside the glass, avoiding
+glass-on-glass while preserving native lensing and accessibility. A dark neutral
+selection color marks focus, drop targets, drag previews, and the edge `+` action.
 
 ## Files
 
@@ -148,6 +158,49 @@ Supported keys under `[hud]`:
 
 Colors accept `#RGB`, `#RGBA`, `#RRGGBB`, or `#RRGGBBAA`.
 
+Mission Control Liquid Glass uses a separate section:
+
+```toml
+[mission_control]
+glass_style = "clear"             # "clear" or "regular"
+corner_radius = 30
+panel_opacity = 1.0
+glass_tint_color = "#050505"
+glass_tint_opacity = 0.08
+background_color = "#ff0000"      # exact color inside native glass
+background_opacity = 0.22
+tile_color = "#0c0d0e24"
+empty_tile_color = "#0c0d0e12"
+tile_border_color = "#0505058f"
+tile_border_width = 1.0
+tile_corner_radius = 15
+hover_color = "#ffffff14"
+accent_color = "#0a0a0ac7"
+accent_border_color = "#050505ff"
+accent_text_color = "#f5f5f5ff"
+primary_text_color = "#111111ff"
+secondary_text_color = "#11111199"
+row_text_color = "#111111cc"
+```
+
+- `glass_tint_color` and `glass_tint_opacity` map to native
+  `NSGlassEffectView.tintColor`.
+- `background_color` and `background_opacity` draw an exact configurable color
+  layer inside native glass. Lower opacity preserves more lensing; high opacity
+  intentionally dominates underlying content.
+- AppKit's public native glass properties are style, corner radius, and tint.
+  Remaining keys configure content drawn inside that single glass plane.
+- `tile_*` and `hover_color` control workspace surfaces and pointer feedback.
+- `accent_color` controls focused workspace, drop targets, drag previews, and
+  edge `+` action; `accent_border_color` controls their outline.
+- `accent_text_color` keeps labels readable over custom accents.
+- `primary_text_color`, `secondary_text_color`, and `row_text_color` control
+  unselected window, metadata, and vertical project-lane labels.
+- Mission Control content renders as a sibling overlay above `NSGlassEffectView`,
+  so configured RGB values stay literal; native glass remains the background.
+- Saving `config.toml` automatically reapplies all values to open Mission
+  Control within about 350ms. Right-click -> `Reload Config` remains available.
+
 ## Controls
 
 - Click tile: jump to workspace
@@ -157,6 +210,7 @@ Colors accept `#RGB`, `#RGBA`, `#RRGGBB`, or `#RRGGBBAA`.
   switching
 - In Mission Control, drag app/window chip to any tile, including empty translucent cells: move that window to the target workspace
 - In Mission Control, hover an edge for the `+` button, then click it to add one empty row or column without switching workspaces
+- In Mission Control, right-click a tile and choose `Add Workspace Before` or `Add Workspace After` to insert an empty slot in that project lane
 - Right-click: open HUD menu
 - Right-click -> `Reload Config`: reload `config.toml`
 - Drag HUD background/tile: move HUD
@@ -180,6 +234,7 @@ Visible grid:
 - Mission Control visible cells: cross-product of active rows and active columns
 - Mission Control empty intersections: lower opacity, still valid click/drop targets
 - Edge `+`: adds one adjacent empty row or column without switching workspaces
+- Tile context menu: inserts before/after in one project lane, shifts populated workspaces right, and disables insertion when column 9 would overflow
 - Unused `+` expansions are transient; closing and reopening recomputes from current apps
 - Example: apps in `w10` and `w23` make Mission Control show rows 1 and 2, columns 0 and 3, including empty `w13` and `w20` targets
 
