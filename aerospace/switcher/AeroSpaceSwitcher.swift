@@ -35,6 +35,7 @@ private func aerospacePath() -> String {
 }
 
 private func workspaceRow(_ workspace: String) -> Int? {
+    if workspace.range(of: #"^q(0|[1-9][0-9]*)$"#, options: .regularExpression) != nil { return 0 }
     guard workspace.range(of: #"^w[1-9][0-9]$"#, options: .regularExpression) != nil,
           let character = workspace.dropFirst().first,
           let row = Int(String(character))
@@ -267,7 +268,7 @@ private final class AeroSpaceClient {
         guard let output = run(["list-workspaces", "--focused"]) else { return nil }
         for line in output.split(whereSeparator: \.isNewline) {
             let workspace = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
-            if workspace.range(of: #"^w[1-9][0-9]$"#, options: .regularExpression) != nil { return workspace }
+            if workspaceRow(workspace) != nil { return workspace }
         }
         return nil
     }
@@ -623,7 +624,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshFocusedFromFile() {
         guard let hint = try? String(contentsOfFile: focusedStatePath, encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines),
-            hint.range(of: #"^w[1-9][0-9]$"#, options: .regularExpression) != nil
+            workspaceRow(hint) != nil
         else { return }
         focusedWorkspace = hint
     }

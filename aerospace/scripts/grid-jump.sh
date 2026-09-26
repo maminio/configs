@@ -2,17 +2,13 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 w10..w99" >&2
+  echo "usage: $0 w10..w99|q0..qN" >&2
   exit 2
 }
 
 [[ $# -eq 1 ]] || usage
-
-target="$1"
-[[ "$target" =~ ^w[1-9][0-9]$ ]] || usage
-
-aerospace_bin="${AEROSPACE_BIN:-aerospace}"
-state_file="/tmp/aerospace-hud-focused-workspace"
-
-printf '%s\n' "$target" > "$state_file" 2>/dev/null || true
-"$aerospace_bin" workspace "$target"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$script_dir/grid-common.sh"
+grid_valid_workspace "$1" || usage
+grid_acquire_lock
+grid_switch "$1"

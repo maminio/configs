@@ -22,7 +22,30 @@ window-management mode.
 
 ## Workspace Model
 
-Workspaces use fixed grid names:
+Quick-action workspaces form an independent row above `base`: `q0`, `q1`, and so
+on. Each accepts one application at a time, including multiple windows from that
+application. Mission Control's persistent `+` adds empty slots without changing
+focus; the row scrolls independently and is not limited to ten columns. Empty
+slots persist in `hud/.quick-spaces-count` (environment override:
+`AEROSPACE_QUICK_SPACES_FILE`). The row uses the existing directional shortcuts:
+up from `base` enters Quick actions, down returns to `base`, and column indices
+clamp to the destination row's bounds. The compact HUD recognizes quick spaces,
+and the app switcher treats them as a separate row.
+
+HUD and shortcut moves into quick spaces recheck application identity against
+fresh window inventory under a shared native PID lock. This rejects mixed-app
+moves made through these surfaces; direct AeroSpace commands and third-party
+moves are outside that guard. No automatic launch or permanent app binding is
+implied by a slot.
+
+Populated Quick-action slots can be reordered by dragging their app icons
+horizontally. The dragged application and all of its windows move together,
+intervening slots shift, and focus follows the active item. The transaction is
+serialized under the same native PID lock as guarded window moves and rolls
+back completed moves if AeroSpace rejects any step. `option-left` and
+`option-right` provide the keyboard-equivalent reorder action.
+
+Project workspaces use fixed grid names:
 
 - Rows/projects: `1..9`
 - Columns: `0..9`
@@ -65,6 +88,11 @@ It supports:
   populated workspaces to its right one column.
 - Drag app/window chip to any tile, including empty translucent cells: move
   that AeroSpace window to the target workspace.
+- Drag a populated Quick actions tile horizontally to reorder its application;
+  all represented windows move together and an insertion marker previews the
+  destination.
+- Press `option-left` / `option-right` on a selected Quick actions workspace to
+  reorder it by one slot.
 - Press `w`/`a`/`s`/`d` or an arrow key: switch to the adjacent visible
   workspace while keeping Mission Control open.
 - Press `Enter` or `Space`: switch to the highlighted workspace and close
@@ -98,7 +126,8 @@ Mission Control follows Apple's Liquid Glass hierarchy on macOS 26:
 
 Mission Control grid contract:
 
-- Initial rows: sorted row numbers that contain at least one window.
+- Quick actions is a separate persistent, horizontally scrollable row above the project grid.
+- Initial project rows always include `base`, plus rows that contain windows.
 - Initial columns: sorted column numbers that contain at least one window.
 - If no windows exist yet, fall back to the focused workspace's row and column.
 - The visible grid is the cross-product of those active rows and columns.

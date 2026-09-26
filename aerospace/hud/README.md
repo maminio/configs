@@ -66,6 +66,45 @@ Its tiles and controls are content-layer fills inside the glass, avoiding
 glass-on-glass while preserving native lensing and accessibility. A dark neutral
 selection color marks focus, drop targets, drag previews, and the edge `+` action.
 
+## Quick actions
+
+Mission Control has an independent **Quick actions** row above `base`. Its spaces
+are named `q0`, `q1`, and so on, without the project grid's ten-column limit.
+
+- Each quick space shows only one centered application icon, even with multiple windows.
+- The always-visible `+` creates an empty space without switching workspaces.
+- Drag a window onto the **Quick actions header** to create a new space and move
+  that window into it. The header highlights while a drop is eligible. If the move
+  fails, the reserved slot is rolled back. Dragging keeps the existing per-window semantics.
+- Drag a window into an empty space. Additional windows from the same application
+  are allowed; moves from a different application into an occupied space are rejected.
+- Drag a populated Quick actions tile horizontally to reorder it. The lifted app
+  follows the pointer, an insertion marker previews its destination, and the
+  intervening items shift as one atomic operation. Every window represented by
+  the app icon travels with it, and an active Quick actions workspace follows
+  its item.
+- Press `option-left` / `option-right` while a Quick actions workspace is
+  selected to move that item one slot without leaving the keyboard.
+- Scroll horizontally when the row overflows. Keyboard navigation reveals the
+  selected quick space automatically.
+- `cmd-1` / `cmd-2` move left/right. The existing row shortcuts move up from `base`
+  into Quick actions and down into `base`, clamping to the nearest valid column.
+- Mission Control's arrows and WASD support the same row transition.
+- Empty spaces persist in `.quick-spaces-count` beside the HUD source. The default
+  is one empty space. `AEROSPACE_QUICK_SPACES_FILE` overrides this path for testing.
+- The HUD and shortcut scripts share a native PID lock (`.quick-spaces-count.lock`)
+  so concurrent guarded moves cannot assign different apps to the same empty space.
+
+These are workspace slots, not application launchers or permanent app assignments.
+An empty slot can receive a different application. Moves performed directly through
+AeroSpace or unrelated tools bypass the HUD/shortcut one-app guard.
+
+Run shortcut regression tests without changing live workspaces:
+
+```bash
+python3 aerospace/hud/tests/test_quick_navigation.py
+```
+
 ## Files
 
 - `AeroSpaceHud.swift`: HUD application source

@@ -151,7 +151,7 @@ def test_mission_control_uses_native_liquid_glass() -> None:
 def test_mission_control_glass_tokens_are_configurable() -> None:
     assert "[mission_control]" in config_text, "Config should expose a Mission Control section"
     assert 'glass_style = "clear"' in config_text, "Config should expose Clear or Regular glass style"
-    assert "corner_radius = 30" in config_text, "Config should expose glass corner radius"
+    assert re.search(r"(?m)^corner_radius\s*=\s*\d+", config_text), "Config should expose a configurable glass corner radius"
     assert "glass_tint_color =" in config_text, "Config should expose native glass tint"
     assert "glass_tint_opacity =" in config_text, "Config should expose native glass tint strength"
     assert "background_color =" in config_text, "Config should expose deterministic background color inside glass"
@@ -185,7 +185,8 @@ def test_liquid_glass_content_hierarchy_and_accessibility() -> None:
     assert "NSColor.labelColor" in swift, "Mission content should use adaptive semantic colors"
     assert "NSColor.secondaryLabelColor" in swift, "Secondary labels should adapt with system appearance"
     assert "override var allowsVibrancy: Bool { false }" in swift, "Configured colors should not be remapped by glass vibrancy"
-    assert "drawWorkspaceIdentifier(workspace, focused: isFocused" in swift, "Each tile should expose its workspace identity"
+    assert "drawWorkspaceLabel(workspace, windows: windows, in: rect)" in swift, "Each tile should render its workspace content"
+    assert "if isFocused || isDropTarget" in swift, "Tiles should retain visible focus/drop-target emphasis"
     assert "context.rotate(by: -.pi / 2)" in row_body, "Project-lane labels should remain vertical"
     assert "roundedRect" not in row_body, "Project-lane labels should not sit inside pills"
     assert 'let number = "\\(row)"' not in row_body, "Project-lane labels should not show row numbers"
@@ -229,7 +230,8 @@ def test_mission_control_keyboard_controls() -> None:
     assert "refocusMissionControlKeyboard()" in toggle_body, "Opening Mission Control should focus the key handler"
     assert "missionPanel.makeFirstResponder(missionView)" in swift, "Focus helper should target the Mission Control key handler"
     assert "refocusMissionControl: true" in swift, "Keyboard navigation should request focus restoration after AeroSpace switches apps"
-    assert "refocusMissionControlKeyboard(after: 0.15)" in jump_body, "Keyboard navigation should re-key Mission Control after app focus settles"
+    assert "navigate(to: workspace" in jump_body, "Workspace jumps should use the serialized navigation path"
+    assert "refocusMissionControlKeyboard(after: 0.15)" in function_body("navigate"), "Keyboard navigation should re-key Mission Control after app focus settles"
 
 
 def test_mission_control_dismisses_before_focusing_window() -> None:

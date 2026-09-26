@@ -6,9 +6,92 @@ private let workspaceCols = 10
 private let statePollInterval: TimeInterval = 0.05
 private let focusedPollInterval: TimeInterval = 0.6
 private let windowsPollInterval: TimeInterval = 3.0
-private let focusedStatePath = "/tmp/aerospace-hud-focused-workspace"
+private let focusedStatePath = ProcessInfo.processInfo.environment["AEROSPACE_FOCUSED_STATE_FILE"]
+    ?? "/tmp/aerospace-hud-focused-workspace"
 private let missionControlSignalPath = "/tmp/aerospace-mission-control-toggle"
 private let autoHideEnabled = ProcessInfo.processInfo.environment["AEROSPACE_HUD_AUTO_HIDE"] != "0"
+
+// Quick workspaces are independent of the fixed project grid. Reject aliases
+// such as q01 so persistence, scripts, and the UI agree on a single name.
+private func quickWorkspaceIndex(_ workspace: String) -> Int? {
+    guard workspace.range(of: #"^q(0|[1-9][0-9]*)$"#, options: .regularExpression) != nil,
+          let index = Int(workspace.dropFirst()), index < Int.max
+    else { return nil }
+    return index
+}
+
+private func isManagedWorkspace(_ workspace: String) -> Bool {
+    workspaceRow(workspace) != nil || quickWorkspaceIndex(workspace) != nil
+}
+
+private enum QuickSpaces {
+    static let path: String = {
+        let override = ProcessInfo.processInfo.environment["AEROSPACE_QUICK_SPACES_FILE"] ?? ""
+        return override.isEmpty
+            ? "/Users/aminmoradi/workspace/configs/aerospace/hud/.quick-spaces-count" : override
+    }()
+
+    static func readCount() -> Int {
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              text.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil,
+              let count = Int(text)
+        else { return 1 }
+        return count
+    }
+
+    static func requiredCount(stored: Int, current: Int, workspaces: [String]) -> Int {
+        let observed = workspaces.compactMap(quickWorkspaceIndex).max().map { $0 + 1 } ?? 1
+        return max(1, stored, current, observed)
+    }
+
+    static func addSlot(minimumCount: Int, populate: (String) -> Bool = { _ in true },
+                        observedWorkspaces: () -> [String]?) -> Int? {
+        withLock { () -> Int? in
+            guard let observed = observedWorkspaces() else { return nil }
+            let stored = readCount()
+            let count = requiredCount(stored: stored, current: minimumCount, workspaces: observed)
+            guard count < Int.max, saveCount(count + 1) else { return nil }
+            guard populate("q\(count)") else {
+                _ = saveCount(stored)
+                return nil
+            }
+            return count + 1
+        } ?? nil
+    }
+
+    // Shared with grid-common.sh: hold this PID lock across the fresh inventory
+    // check AND CLI move, so simultaneous keyboard and pointer moves cannot
+    // both claim an empty quick slot for different applications.
+    static func withLock<T>(_ action: () -> T) -> T? {
+        let lockPath = path + ".lock"
+        for _ in 0..<250 {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/shlock")
+            process.arguments = ["-p", String(ProcessInfo.processInfo.processIdentifier), "-f", lockPath]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            do { try process.run() } catch { return nil }
+            process.waitUntilExit()
+            if process.terminationStatus == 0 {
+                defer { try? FileManager.default.removeItem(atPath: lockPath) }
+                return action()
+            }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        return nil
+    }
+
+    @discardableResult static func saveCount(_ count: Int) -> Bool {
+        do {
+            try "\(count)\n".write(toFile: path, atomically: true, encoding: .utf8)
+            return true
+        } catch {
+            NSLog("Cannot persist Quick actions at %@: %@", path, error.localizedDescription)
+            return false
+        }
+    }
+}
 
 private enum GridNavigationDirection {
     case up
@@ -64,8 +147,150 @@ private struct WorkspaceWindow: Equatable {
     let windowTitle: String
     let bundleID: String
 
+    func belongsToSameApplication(as other: WorkspaceWindow) -> Bool {
+        if !bundleID.isEmpty && !other.bundleID.isEmpty { return bundleID == other.bundleID }
+        return appName == other.appName
+    }
+
     func moved(to workspace: String) -> WorkspaceWindow {
         WorkspaceWindow(workspace: workspace, windowID: windowID, appName: appName, windowTitle: windowTitle, bundleID: bundleID)
+    }
+}
+
+private struct QuickSpaceCompaction {
+    let count: Int
+    let inventory: [String: [WorkspaceWindow]]
+    let moves: [(window: WorkspaceWindow, target: String)]
+}
+
+private struct QuickSpaceRemoval {
+    let count: Int
+    let focusedWorkspace: String
+    let inventory: [String: [WorkspaceWindow]]
+}
+
+private struct QuickSpaceReorder {
+    let count: Int
+    let focusedWorkspace: String
+    let inventory: [String: [WorkspaceWindow]]
+    let moves: [(window: WorkspaceWindow, target: String)]
+}
+
+private func quickSpaceCompaction(
+    removing index: Int,
+    count: Int,
+    inventory: [String: [WorkspaceWindow]]
+) -> QuickSpaceCompaction? {
+    guard count > 1, 0..<count ~= index,
+          inventory["q\(index)", default: []].isEmpty
+    else { return nil }
+
+    var compacted: [String: [WorkspaceWindow]] = [:]
+    var moves: [(window: WorkspaceWindow, target: String)] = []
+    for (workspace, windows) in inventory {
+        guard let sourceIndex = quickWorkspaceIndex(workspace), sourceIndex > index else {
+            compacted[workspace, default: []].append(contentsOf: windows)
+            continue
+        }
+        let target = "q\(sourceIndex - 1)"
+        for window in windows {
+            compacted[target, default: []].append(window.moved(to: target))
+            moves.append((window, target))
+        }
+    }
+    moves.sort {
+        let left = quickWorkspaceIndex($0.window.workspace) ?? 0
+        let right = quickWorkspaceIndex($1.window.workspace) ?? 0
+        return left == right ? $0.window.windowID < $1.window.windowID : left < right
+    }
+    return QuickSpaceCompaction(count: count - 1, inventory: compacted, moves: moves)
+}
+
+private func quickFocusAfterRemovingSlot(_ index: Int, count: Int, focusedWorkspace: String) -> String {
+    guard let focusedIndex = quickWorkspaceIndex(focusedWorkspace) else { return focusedWorkspace }
+    if focusedIndex > index { return "q\(focusedIndex - 1)" }
+    if focusedIndex == index { return "q\(min(index, count - 2))" }
+    return focusedWorkspace
+}
+
+private func quickSpaceReorder(
+    from sourceIndex: Int,
+    to targetIndex: Int,
+    count: Int,
+    focusedWorkspace: String,
+    inventory: [String: [WorkspaceWindow]]
+) -> QuickSpaceReorder? {
+    guard count > 1,
+          0..<count ~= sourceIndex,
+          0..<count ~= targetIndex,
+          sourceIndex != targetIndex
+    else { return nil }
+
+    let sourceWorkspace = "q\(sourceIndex)"
+    let sourceWindows = inventory[sourceWorkspace, default: []]
+    guard !sourceWindows.isEmpty else { return nil }
+
+    func destinationIndex(for index: Int) -> Int {
+        if index == sourceIndex { return targetIndex }
+        if sourceIndex < targetIndex, sourceIndex < index, index <= targetIndex { return index - 1 }
+        if sourceIndex > targetIndex, targetIndex <= index, index < sourceIndex { return index + 1 }
+        return index
+    }
+
+    var reordered: [String: [WorkspaceWindow]] = [:]
+    for (workspace, windows) in inventory {
+        guard let index = quickWorkspaceIndex(workspace), index < count else {
+            reordered[workspace, default: []].append(contentsOf: windows)
+            continue
+        }
+        let target = "q\(destinationIndex(for: index))"
+        reordered[target, default: []].append(contentsOf: windows.map { $0.moved(to: target) })
+    }
+    for workspace in reordered.keys {
+        reordered[workspace] = reordered[workspace]?.sorted {
+            if $0.appName == $1.appName { return $0.windowID < $1.windowID }
+            return $0.appName.localizedCaseInsensitiveCompare($1.appName) == .orderedAscending
+        }
+    }
+
+    // Stage the lifted item just beyond the persistent range, shift each
+    // intervening slot into the vacancy, then place the item at its destination.
+    let temporaryWorkspace = "q\(count)"
+    var moves = sourceWindows.map { (window: $0, target: temporaryWorkspace) }
+    let shiftedIndices: [Int]
+    if sourceIndex < targetIndex {
+        shiftedIndices = Array((sourceIndex + 1)...targetIndex)
+    } else {
+        shiftedIndices = Array(stride(from: sourceIndex - 1, through: targetIndex, by: -1))
+    }
+    for index in shiftedIndices {
+        let target = "q\(destinationIndex(for: index))"
+        moves.append(contentsOf: inventory["q\(index)", default: []].map { (window: $0, target: target) })
+    }
+    moves.append(contentsOf: sourceWindows.map {
+        (window: $0.moved(to: temporaryWorkspace), target: "q\(targetIndex)")
+    })
+
+    let nextFocus: String
+    if let focusedIndex = quickWorkspaceIndex(focusedWorkspace), focusedIndex < count {
+        nextFocus = "q\(destinationIndex(for: focusedIndex))"
+    } else {
+        nextFocus = focusedWorkspace
+    }
+    return QuickSpaceReorder(
+        count: count,
+        focusedWorkspace: nextFocus,
+        inventory: reordered,
+        moves: moves
+    )
+}
+
+private func canMoveWindow(_ window: WorkspaceWindow, to workspace: String,
+                           in inventory: [String: [WorkspaceWindow]]) -> Bool {
+    guard isManagedWorkspace(workspace) else { return false }
+    guard quickWorkspaceIndex(workspace) != nil else { return true }
+    return (inventory[workspace] ?? []).allSatisfy {
+        $0.windowID == window.windowID || window.belongsToSameApplication(as: $0)
     }
 }
 
@@ -86,6 +311,15 @@ private func appIcon(bundleID: String) -> NSImage? {
     let icon = NSWorkspace.shared.icon(forFile: url.path)
     appIconCache[bundleID] = icon
     return icon
+}
+
+private func drawQuickAppIcon(_ window: WorkspaceWindow, in rect: NSRect, fraction: CGFloat = 1) {
+    let size = min(32, min(rect.width, rect.height) - 16)
+    guard size > 0 else { return }
+    let icon = appIcon(bundleID: window.bundleID)
+        ?? NSImage(systemSymbolName: "app", accessibilityDescription: displayAppName(window.appName))
+    icon?.draw(in: NSRect(x: rect.midX - size / 2, y: rect.midY - size / 2, width: size, height: size),
+               from: .zero, operation: .sourceOver, fraction: fraction, respectFlipped: true, hints: nil)
 }
 
 private struct HudConfig {
@@ -448,7 +682,7 @@ private final class AeroSpaceClient {
 
         for line in output.split(whereSeparator: \.isNewline) {
             let workspace = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
-            if workspace.range(of: #"^w[1-9][0-9]$"#, options: .regularExpression) != nil {
+            if isManagedWorkspace(workspace) {
                 return workspace
             }
         }
@@ -456,24 +690,32 @@ private final class AeroSpaceClient {
     }
 
     func windowsByWorkspace() -> [String: [WorkspaceWindow]] {
+        windowInventory() ?? [:]
+    }
+
+    // An unavailable inventory must not look like an empty quick workspace.
+    func windowInventory() -> [String: [WorkspaceWindow]]? {
         guard let output = run(["list-windows", "--all", "--format", "%{workspace}\t%{window-id}\t%{app-name}\t%{app-bundle-id}\t%{window-title}"]) else {
-            return [:]
+            return nil
         }
 
+        return Self.parseWindowInventory(output)
+    }
+
+    static func parseWindowInventory(_ output: String) -> [String: [WorkspaceWindow]]? {
         var result: [String: [WorkspaceWindow]] = [:]
         for line in output.split(whereSeparator: \.isNewline) {
             let parts = line.split(separator: "\t", maxSplits: 4, omittingEmptySubsequences: false).map(String.init)
-            guard parts.count >= 3 else { continue }
-
             let workspace = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+            // AeroSpace may emit warning lines before metadata. Ignore those,
+            // but fail closed on a malformed record belonging to our grid.
+            guard isManagedWorkspace(workspace) else { continue }
+            guard parts.count >= 4 else { return nil }
             let windowID = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
             let app = parts[2].trimmingCharacters(in: .whitespacesAndNewlines)
             let bundleID = parts.count > 3 ? parts[3].trimmingCharacters(in: .whitespacesAndNewlines) : ""
             let title = parts.count > 4 ? parts[4].trimmingCharacters(in: .whitespacesAndNewlines) : ""
-            guard workspace.range(of: #"^w[1-9][0-9]$"#, options: .regularExpression) != nil,
-                  !windowID.isEmpty,
-                  !app.isEmpty
-            else { continue }
+            guard !windowID.isEmpty, !app.isEmpty else { return nil }
 
             result[workspace, default: []].append(WorkspaceWindow(workspace: workspace, windowID: windowID, appName: app, windowTitle: title, bundleID: bundleID))
         }
@@ -491,16 +733,158 @@ private final class AeroSpaceClient {
         return result
     }
 
-    func switchWorkspace(_ workspace: String) {
-        _ = run(["workspace", workspace])
+    @discardableResult func switchWorkspace(_ workspace: String) -> Bool {
+        isManagedWorkspace(workspace) && run(["workspace", workspace]) != nil
     }
 
-    func focusWindow(_ window: WorkspaceWindow) {
-        _ = run(["focus", "--window-id", window.windowID])
+    @discardableResult func focusWindow(_ window: WorkspaceWindow) -> Bool {
+        run(["focus", "--window-id", window.windowID]) != nil
+    }
+
+    func createQuickWorkspace(containing window: WorkspaceWindow, minimumCount: Int) -> Int? {
+        // Allocate, persist and move under the same lock as keyboard moves.
+        // A failed move rolls back the reserved slot without changing focus.
+        QuickSpaces.addSlot(minimumCount: minimumCount, populate: { workspace in
+            self.run(["move-node-to-workspace", "--window-id", window.windowID, workspace]) != nil
+        }, observedWorkspaces: {
+            guard let inventory = self.windowInventory(), let focus = self.focusedWorkspace(),
+                  let live = inventory.values.joined().first(where: { $0.windowID == window.windowID }),
+                  live.belongsToSameApplication(as: window) else { return nil }
+            return Array(inventory.keys) + [focus]
+        })
+    }
+
+    func removeQuickWorkspace(at index: Int, minimumCount: Int) -> QuickSpaceRemoval? {
+        QuickSpaces.withLock { () -> QuickSpaceRemoval? in
+            guard let inventory = self.windowInventory(),
+                  let focusedWorkspace = self.focusedWorkspace()
+            else { return nil }
+
+            let stored = QuickSpaces.readCount()
+            let count = QuickSpaces.requiredCount(
+                stored: stored,
+                current: minimumCount,
+                workspaces: Array(inventory.keys) + [focusedWorkspace]
+            )
+            guard let compaction = quickSpaceCompaction(
+                removing: index,
+                count: count,
+                inventory: inventory
+            ) else { return nil }
+
+            var completed: [(window: WorkspaceWindow, target: String)] = []
+            for move in compaction.moves {
+                guard self.run([
+                    "move-node-to-workspace", "--window-id", move.window.windowID, move.target,
+                ]) != nil else {
+                    for completedMove in completed.reversed() {
+                        _ = self.run([
+                            "move-node-to-workspace", "--window-id", completedMove.window.windowID,
+                            completedMove.window.workspace,
+                        ])
+                    }
+                    return nil
+                }
+                completed.append(move)
+            }
+
+            let nextFocus = quickFocusAfterRemovingSlot(
+                index,
+                count: count,
+                focusedWorkspace: focusedWorkspace
+            )
+            if nextFocus != focusedWorkspace, self.run(["workspace", nextFocus]) == nil {
+                for completedMove in completed.reversed() {
+                    _ = self.run([
+                        "move-node-to-workspace", "--window-id", completedMove.window.windowID,
+                        completedMove.window.workspace,
+                    ])
+                }
+                return nil
+            }
+
+            guard QuickSpaces.saveCount(compaction.count) else {
+                if nextFocus != focusedWorkspace { _ = self.run(["workspace", focusedWorkspace]) }
+                for completedMove in completed.reversed() {
+                    _ = self.run([
+                        "move-node-to-workspace", "--window-id", completedMove.window.windowID,
+                        completedMove.window.workspace,
+                    ])
+                }
+                return nil
+            }
+
+            return QuickSpaceRemoval(
+                count: compaction.count,
+                focusedWorkspace: nextFocus,
+                inventory: compaction.inventory
+            )
+        } ?? nil
+    }
+
+    func reorderQuickWorkspace(from sourceIndex: Int, to targetIndex: Int, minimumCount: Int) -> QuickSpaceReorder? {
+        QuickSpaces.withLock { () -> QuickSpaceReorder? in
+            guard let inventory = self.windowInventory(),
+                  let focusedWorkspace = self.focusedWorkspace()
+            else { return nil }
+
+            let count = QuickSpaces.requiredCount(
+                stored: QuickSpaces.readCount(),
+                current: minimumCount,
+                workspaces: Array(inventory.keys) + [focusedWorkspace]
+            )
+            guard let reorder = quickSpaceReorder(
+                from: sourceIndex,
+                to: targetIndex,
+                count: count,
+                focusedWorkspace: focusedWorkspace,
+                inventory: inventory
+            ) else { return nil }
+
+            var completed: [(window: WorkspaceWindow, target: String)] = []
+            for move in reorder.moves {
+                guard self.run([
+                    "move-node-to-workspace", "--window-id", move.window.windowID, move.target,
+                ]) != nil else {
+                    for completedMove in completed.reversed() {
+                        _ = self.run([
+                            "move-node-to-workspace", "--window-id", completedMove.window.windowID,
+                            completedMove.window.workspace,
+                        ])
+                    }
+                    return nil
+                }
+                completed.append(move)
+            }
+
+            if reorder.focusedWorkspace != focusedWorkspace,
+               self.run(["workspace", reorder.focusedWorkspace]) == nil
+            {
+                for completedMove in completed.reversed() {
+                    _ = self.run([
+                        "move-node-to-workspace", "--window-id", completedMove.window.windowID,
+                        completedMove.window.workspace,
+                    ])
+                }
+                return nil
+            }
+            return reorder
+        } ?? nil
     }
 
     func moveWindow(_ window: WorkspaceWindow, to workspace: String) -> Bool {
-        run(["move-node-to-workspace", "--window-id", window.windowID, workspace]) != nil
+        guard isManagedWorkspace(workspace) else { return false }
+        if quickWorkspaceIndex(workspace) != nil {
+            return QuickSpaces.withLock {
+                guard let inventory = self.windowInventory(),
+                      let current = inventory.values.joined().first(where: { $0.windowID == window.windowID }),
+                      current.belongsToSameApplication(as: window),
+                      canMoveWindow(current, to: workspace, in: inventory)
+                else { return false }
+                return self.run(["move-node-to-workspace", "--window-id", window.windowID, workspace]) != nil
+            } ?? false
+        }
+        return run(["move-node-to-workspace", "--window-id", window.windowID, workspace]) != nil
     }
 
     private func run(_ arguments: [String]) -> String? {
@@ -509,9 +893,8 @@ private final class AeroSpaceClient {
         process.arguments = arguments
 
         let outputPipe = Pipe()
-        let errorPipe = Pipe()
         process.standardOutput = outputPipe
-        process.standardError = errorPipe
+        process.standardError = FileHandle.nullDevice
 
         do {
             try process.run()
@@ -519,15 +902,55 @@ private final class AeroSpaceClient {
             return nil
         }
 
+        // Drain before waiting: a large window inventory can fill the pipe.
+        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         guard process.terminationStatus == 0 else { return nil }
 
-        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
         return String(data: data, encoding: .utf8)
     }
 }
 
 private final class HudView: NSView {
+    var quickSpaceCount = 1 { didSet { needsDisplay = true } }
+    private var quickScrollOffset: CGFloat = 0
+    private var quickBandHeight: CGFloat { config.tileHeight + config.gap }
+    private var quickViewport: NSRect {
+        NSRect(x: config.margin, y: config.margin + config.headerHeight,
+               width: max(1, bounds.width - config.margin * 2), height: config.tileHeight)
+    }
+
+    private func quickTileRect(at index: Int) -> NSRect {
+        NSRect(x: quickViewport.minX + CGFloat(index) * (config.tileWidth + config.gap) - quickScrollOffset,
+               y: quickViewport.minY, width: config.tileWidth, height: config.tileHeight)
+    }
+
+    private func visibleQuickTiles() -> [(String, NSRect)] {
+        let rawIndex = Int(exactly: floor(quickScrollOffset / (config.tileWidth + config.gap))) ?? (quickSpaceCount - 1)
+        let first = max(0, min(quickSpaceCount - 1, rawIndex))
+        let shown = max(1, Int(ceil(quickViewport.width / (config.tileWidth + config.gap))) + 1)
+        let end = first + min(quickSpaceCount - first, shown)
+        return (first..<end).map { ("q\($0)", quickTileRect(at: $0)) }
+    }
+
+    func revealQuickWorkspace(_ workspace: String) {
+        guard let index = quickWorkspaceIndex(workspace), index < quickSpaceCount else { return }
+        let x = CGFloat(index) * (config.tileWidth + config.gap)
+        if x < quickScrollOffset { quickScrollOffset = x }
+        else if x + config.tileWidth > quickScrollOffset + quickViewport.width {
+            quickScrollOffset = max(0, x + config.tileWidth - quickViewport.width)
+        }
+        needsDisplay = true
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard quickViewport.contains(convert(event.locationInWindow, from: nil)) else { return }
+        let delta = abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) ? event.scrollingDeltaX : event.scrollingDeltaY
+        let maximum = max(0, CGFloat(quickSpaceCount) * (config.tileWidth + config.gap) - config.gap - quickViewport.width)
+        quickScrollOffset = min(maximum, max(0, quickScrollOffset - delta * (event.hasPreciseScrollingDeltas ? 1 : 12)))
+        needsDisplay = true
+    }
+
     var config: HudConfig {
         didSet {
             needsDisplay = true
@@ -553,6 +976,7 @@ private final class HudView: NSView {
     var windowsByWorkspace: [String: [WorkspaceWindow]] = [:] {
         didSet {
             if oldValue != windowsByWorkspace {
+                needsLayout = true
                 needsDisplay = true
             }
         }
@@ -610,6 +1034,11 @@ private final class HudView: NSView {
         if config.headerHeight > 0 {
             drawHeader(in: NSRect(x: config.margin, y: config.margin, width: bounds.width - config.margin * 2, height: config.headerHeight))
         }
+
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: quickViewport).addClip()
+        for (workspace, rect) in visibleQuickTiles() { drawTile(workspace: workspace, rect: rect) }
+        NSGraphicsContext.restoreGraphicsState()
 
         for rowIndex in 0..<visibleRows {
             for colIndex in 0..<visibleCols {
@@ -726,7 +1155,7 @@ private final class HudView: NSView {
 
     func preferredHeight(for rowCount: Int) -> CGFloat {
         let rows = CGFloat(max(1, min(workspaceRows, rowCount)))
-        return config.margin * 2 + config.headerHeight + config.gap * (rows - 1) + config.tileHeight * rows
+        return config.margin * 2 + config.headerHeight + quickBandHeight + config.gap * (rows - 1) + config.tileHeight * rows
     }
 
     func preferredWidth(for colCount: Int) -> CGFloat {
@@ -744,9 +1173,9 @@ private final class HudView: NSView {
     private func layoutMetrics() -> LayoutMetrics {
         let gridRect = NSRect(
             x: config.margin,
-            y: config.margin + config.headerHeight,
+            y: config.margin + config.headerHeight + quickBandHeight,
             width: bounds.width - config.margin * 2,
-            height: bounds.height - config.margin * 2 - config.headerHeight
+            height: max(1, bounds.height - config.margin * 2 - config.headerHeight - quickBandHeight)
         )
         let colCount = max(1, visibleCols)
         let tileWidth = (gridRect.width - config.gap * CGFloat(colCount - 1)) / CGFloat(colCount)
@@ -766,6 +1195,7 @@ private final class HudView: NSView {
     }
 
     func tileRect(for workspace: String) -> NSRect? {
+        if let index = quickWorkspaceIndex(workspace), index < quickSpaceCount { return quickTileRect(at: index) }
         guard let row = workspaceRow(workspace),
               let col = workspaceColumn(workspace)
         else { return nil }
@@ -779,6 +1209,9 @@ private final class HudView: NSView {
     }
 
     private func workspace(at point: NSPoint) -> String? {
+        if quickViewport.contains(point) {
+            return visibleQuickTiles().first(where: { $0.1.contains(point) })?.0
+        }
         let metrics = layoutMetrics()
         guard point.x >= metrics.gridRect.minX,
               point.y >= metrics.gridRect.minY
@@ -819,7 +1252,11 @@ private final class HudView: NSView {
         path.fill()
 
         let apps = appNames(in: workspace)
-        drawWorkspaceLabel(workspace, apps: apps, in: rect)
+        if quickWorkspaceIndex(workspace) != nil {
+            if let window = windowsByWorkspace[workspace]?.first { drawQuickAppIcon(window, in: rect) }
+        } else {
+            drawWorkspaceLabel(workspace, apps: apps, in: rect)
+        }
 
         if workspace == focusedWorkspace {
             config.selectedColor.setStroke()
@@ -906,6 +1343,395 @@ private final class MissionControlView: NSView {
     var onReorderRows: ((Int, Int) -> Void)?
     var onKeyboardWorkspaceNavigate: ((String) -> Void)?
     var onKeyboardDismiss: (() -> Void)?
+    var onAddQuickWorkspace: (() -> Void)?
+    var onRemoveQuickWorkspace: ((String) -> Void)?
+    var onReorderQuickWorkspace: ((String, String) -> Void)?
+    var quickSpaceCount = 1 {
+        didSet { needsLayout = true; needsDisplay = true }
+    }
+    private var quickScrollOffset: CGFloat = 0
+    private var quickBandHeight: CGFloat { Style.quickBandHeight }
+    private let quickTileWidth: CGFloat = 64
+    private let quickAddButtonSide: CGFloat = 30
+    private var hoveredQuickCloseWorkspace: String?
+    private var dragCreatesQuickWorkspace = false
+    var onWindowDropOnQuickHeader: ((WorkspaceWindow) -> Void)?
+    private var quickDragScrollTimer: Timer?
+    private lazy var quickAddButton: NSButton = {
+        let button = NSButton(title: "", target: self, action: #selector(addQuickWorkspace))
+        button.bezelStyle = .circular
+        button.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 16, weight: .medium))
+        button.imagePosition = .imageOnly
+        button.imageScaling = .scaleNone
+        button.alignment = .center
+        button.toolTip = "Add an empty Quick actions workspace (+). Keeps your current workspace."
+        button.setAccessibilityLabel("Add Quick actions workspace")
+        return button
+    }()
+    private lazy var quickScroller: NSScroller = {
+        let scroller = NSScroller(frame: NSRect(x: 0, y: 0, width: 200, height: 12))
+        scroller.scrollerStyle = .legacy
+        scroller.controlSize = .small
+        scroller.target = self
+        scroller.action = #selector(scrollQuickActions(_:))
+        scroller.setAccessibilityLabel("Quick actions horizontal scroll")
+        return scroller
+    }()
+
+    @objc private func addQuickWorkspace() {
+        onAddQuickWorkspace?()
+        window?.makeFirstResponder(self)
+    }
+
+    private var quickViewport: NSRect {
+        let availableWidth = max(
+            1,
+            bounds.width - config.margin * 2 - Style.railWidth - config.gap - quickAddButtonSide
+        )
+        return NSRect(
+            x: config.margin + Style.railWidth,
+            y: config.margin + 26,
+            width: min(availableWidth, quickContentWidth),
+            height: 64
+        )
+    }
+
+    private func quickWidth(at index: Int) -> CGFloat { quickTileWidth }
+
+    private func quickOrigin(at index: Int) -> CGFloat {
+        CGFloat(index) * (quickTileWidth + config.gap)
+    }
+
+    private var quickHeaderRect: NSRect {
+        NSRect(x: config.margin, y: config.margin - 4,
+               width: max(1, bounds.width - config.margin * 2), height: 28)
+    }
+
+    private func isQuickHeaderDrop(at point: NSPoint) -> Bool {
+        quickHeaderRect.contains(point)
+    }
+
+    @discardableResult private func completeQuickHeaderDrop(_ window: WorkspaceWindow, at point: NSPoint) -> Bool {
+        guard isQuickHeaderDrop(at: point) else { return false }
+        onWindowDropOnQuickHeader?(window)
+        return true
+    }
+
+    private var quickContentWidth: CGFloat {
+        quickOrigin(at: quickSpaceCount - 1) + quickWidth(at: quickSpaceCount - 1)
+    }
+
+    private func quickTileRect(at index: Int) -> NSRect {
+        NSRect(x: quickViewport.minX + quickOrigin(at: index) - quickScrollOffset,
+               y: quickViewport.minY, width: quickWidth(at: index), height: quickViewport.height)
+    }
+
+    private func quickReorderWorkspace(at point: NSPoint) -> String? {
+        guard quickViewport.contains(point), quickSpaceCount > 0 else { return nil }
+        let unit = quickTileWidth + config.gap
+        let contentX = point.x - quickViewport.minX + quickScrollOffset
+        let nearestIndex = Int(round((contentX - quickTileWidth / 2) / unit))
+        return "q\(max(0, min(quickSpaceCount - 1, nearestIndex)))"
+    }
+
+    @discardableResult private func completeQuickReorder(at point: NSPoint) -> Bool {
+        guard didDrag,
+              let source = draggedQuickWorkspace,
+              let target = quickReorderWorkspace(at: point),
+              source != target
+        else { return false }
+        onReorderQuickWorkspace?(source, target)
+        return true
+    }
+
+    private func quickCloseButtonRect(in tileRect: NSRect) -> NSRect {
+        NSRect(x: tileRect.maxX - 23, y: tileRect.minY + 3, width: 20, height: 20)
+    }
+
+    private func quickCloseWorkspace(at point: NSPoint) -> String? {
+        guard quickSpaceCount > 1 else { return nil }
+        for (workspace, tileRect) in visibleQuickTiles()
+        where windowsByWorkspace[workspace, default: []].isEmpty {
+            let hitRect = quickCloseButtonRect(in: tileRect).insetBy(dx: -3, dy: -3)
+            if hitRect.contains(point) { return workspace }
+        }
+        return nil
+    }
+
+    private func requestQuickWorkspaceRemoval(_ workspace: String) {
+        guard quickSpaceCount > 1,
+              quickWorkspaceIndex(workspace) != nil,
+              windowsByWorkspace[workspace, default: []].isEmpty
+        else { return }
+        onRemoveQuickWorkspace?(workspace)
+        window?.makeFirstResponder(self)
+    }
+
+    private func drawQuickCloseButton(for workspace: String, in tileRect: NSRect) {
+        guard quickSpaceCount > 1,
+              windowsByWorkspace[workspace, default: []].isEmpty
+        else { return }
+
+        let rect = quickCloseButtonRect(in: tileRect)
+        let hovered = hoveredQuickCloseWorkspace == workspace
+        NSColor.labelColor.withAlphaComponent(hovered ? 0.20 : 0.10).setFill()
+        NSBezierPath(ovalIn: rect).fill()
+
+        NSColor.labelColor.withAlphaComponent(hovered ? 0.86 : 0.58).setStroke()
+        let mark = NSBezierPath()
+        let inset: CGFloat = 6.5
+        mark.move(to: NSPoint(x: rect.minX + inset, y: rect.minY + inset))
+        mark.line(to: NSPoint(x: rect.maxX - inset, y: rect.maxY - inset))
+        mark.move(to: NSPoint(x: rect.maxX - inset, y: rect.minY + inset))
+        mark.line(to: NSPoint(x: rect.minX + inset, y: rect.maxY - inset))
+        mark.lineWidth = increaseContrast ? 1.8 : 1.4
+        mark.lineCapStyle = .round
+        mark.stroke()
+    }
+
+    // Virtualize empty slots: adding slots never allocates one view per workspace.
+    private func visibleQuickTiles() -> [(String, NSRect)] {
+        var low = 0
+        var high = quickSpaceCount
+        while low < high {
+            let mid = low + (high - low) / 2
+            if quickOrigin(at: mid) + quickWidth(at: mid) < quickScrollOffset { low = mid + 1 }
+            else { high = mid }
+        }
+        var result: [(String, NSRect)] = []
+        var index = low
+        while index < quickSpaceCount {
+            let rect = quickTileRect(at: index)
+            if rect.minX >= quickViewport.maxX { break }
+            result.append(("q\(index)", rect))
+            index += 1
+        }
+        return result
+    }
+
+    override func layout() {
+        super.layout()
+        if quickAddButton.superview == nil { addSubview(quickAddButton); addSubview(quickScroller) }
+        quickAddButton.frame = NSRect(
+            x: quickViewport.maxX + config.gap,
+            y: quickViewport.midY - quickAddButtonSide / 2,
+            width: quickAddButtonSide,
+            height: quickAddButtonSide
+        )
+        quickScroller.frame = NSRect(x: quickViewport.minX, y: quickViewport.maxY + 3,
+                                     width: quickViewport.width, height: 12)
+        setQuickScroll(quickScrollOffset)
+    }
+
+    private func setQuickScroll(_ offset: CGFloat) {
+        let maximum = max(0, quickContentWidth - quickViewport.width)
+        quickScrollOffset = min(maximum, max(0, offset))
+        quickScroller.isHidden = maximum <= 0
+        quickScroller.isEnabled = maximum > 0
+        quickScroller.knobProportion = min(1, quickViewport.width / max(1, quickContentWidth))
+        quickScroller.doubleValue = maximum > 0 ? Double(quickScrollOffset / maximum) : 0
+        needsDisplay = true
+    }
+
+    func revealQuickWorkspace(_ workspace: String) {
+        guard let index = quickWorkspaceIndex(workspace), index < quickSpaceCount else { return }
+        let start = quickOrigin(at: index)
+        let visibleWidth = min(quickWidth(at: index), quickViewport.width)
+        if start < quickScrollOffset { setQuickScroll(start) }
+        else if start + visibleWidth > quickScrollOffset + quickViewport.width {
+            setQuickScroll(start + visibleWidth - quickViewport.width)
+        }
+    }
+
+    @objc private func scrollQuickActions(_ sender: NSScroller) {
+        let page = quickViewport.width * 0.8
+        switch sender.hitPart {
+        case .decrementLine: setQuickScroll(quickScrollOffset - 40)
+        case .incrementLine: setQuickScroll(quickScrollOffset + 40)
+        case .decrementPage: setQuickScroll(quickScrollOffset - page)
+        case .incrementPage: setQuickScroll(quickScrollOffset + page)
+        default: setQuickScroll(CGFloat(sender.doubleValue) * max(0, quickContentWidth - quickViewport.width))
+        }
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        guard point.y < layoutMetrics().gridRect.minY else { super.scrollWheel(with: event); return }
+        let delta = abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) ? event.scrollingDeltaX : event.scrollingDeltaY
+        setQuickScroll(quickScrollOffset - delta * (event.hasPreciseScrollingDeltas ? 1 : 12))
+        updateOverflowHover(at: point)
+        updateQuickCloseHover(at: point)
+    }
+
+    // Called only by the opt-in fixture harness below; never queries AeroSpace.
+    fileprivate func verifyQuickLayout() {
+        layoutSubtreeIfNeeded()
+        precondition(bounds.contains(quickAddButton.frame), "Quick + must stay inside the panel")
+        precondition(quickAddButton.accessibilityLabel() == "Add Quick actions workspace")
+        precondition(abs(quickAddButton.frame.midY - quickViewport.midY) < 0.5,
+                     "Quick + must align vertically with the Quick actions row")
+        precondition(abs(quickAddButton.frame.minX - quickViewport.maxX - config.gap) < 0.5,
+                     "Quick + must sit immediately after the Quick actions row")
+        precondition(quickViewport.maxY < layoutMetrics().gridRect.minY, "Quick row must be above base")
+        precondition(visibleRowValues.first == 1, "Base must remain visible")
+        let previousFocus = focusedWorkspace
+        var additions = 0
+        onAddQuickWorkspace = { additions += 1 }
+        quickAddButton.performClick(nil)
+        precondition(additions == 1 && focusedWorkspace == previousFocus, "Add cannot change focus")
+        onAddQuickWorkspace = nil
+        if quickSpaceCount > 1,
+           let emptyWorkspace = (0..<quickSpaceCount)
+            .map({ "q\($0)" })
+            .first(where: { windowsByWorkspace[$0, default: []].isEmpty })
+        {
+            revealQuickWorkspace(emptyWorkspace)
+            let closePoint = NSPoint(
+                x: quickCloseButtonRect(in: tileRect(for: emptyWorkspace)!).midX,
+                y: quickCloseButtonRect(in: tileRect(for: emptyWorkspace)!).midY
+            )
+            precondition(quickCloseWorkspace(at: closePoint) == emptyWorkspace)
+            var removals: [String] = []
+            onRemoveQuickWorkspace = { removals.append($0) }
+            requestQuickWorkspaceRemoval(emptyWorkspace)
+            precondition(removals == [emptyWorkspace], "Empty Quick actions close button must request its slot")
+            onRemoveQuickWorkspace = nil
+        }
+        revealQuickWorkspace("q\(quickSpaceCount - 1)")
+        let last = quickTileRect(at: quickSpaceCount - 1)
+        let hit = NSPoint(x: max(last.minX, quickViewport.minX) + 3, y: last.minY + 3)
+        precondition(quickViewport.contains(hit) && workspace(at: hit) == "q\(quickSpaceCount - 1)")
+        precondition(workspace(at: NSPoint(x: quickViewport.minX - 1, y: quickViewport.midY)) == nil)
+        if let populated = windowsByWorkspace.first(where: { quickWorkspaceIndex($0.key) != nil && $0.value.count > 1 }) {
+            revealQuickWorkspace(populated.key)
+            let rect = tileRect(for: populated.key)!
+            precondition(windowChipRects(workspace: populated.key, tileRect: rect).count == 1,
+                         "A quick space must expose one app icon, not one chip per window")
+            precondition(rect.width == quickTileWidth && quickWidth(at: 0) == quickWidth(at: 1))
+            let headerPoint = NSPoint(x: quickHeaderRect.midX, y: quickHeaderRect.midY)
+            var drops = 0
+            onWindowDropOnQuickHeader = { window in
+                precondition(window.windowID == populated.value[0].windowID)
+                drops += 1
+            }
+            draggedWindow = populated.value[0]
+            updateDragTarget(at: headerPoint)
+            precondition(dragCreatesQuickWorkspace && dragTargetWorkspace == nil)
+            precondition(completeQuickHeaderDrop(populated.value[0], at: headerPoint))
+            precondition(!completeQuickHeaderDrop(populated.value[0], at: NSPoint(x: rect.midX, y: rect.midY)))
+            precondition(drops == 1 && focusedWorkspace == previousFocus)
+            draggedWindow = nil
+            updateDragTarget(at: headerPoint)
+            precondition(!dragCreatesQuickWorkspace)
+            onWindowDropOnQuickHeader = nil
+
+            revealQuickWorkspace("q0")
+            let reorderPoint = NSPoint(x: quickTileRect(at: 0).midX, y: quickViewport.midY)
+            var reorders: [(String, String)] = []
+            onReorderQuickWorkspace = { reorders.append(($0, $1)) }
+            draggedWindow = populated.value[0]
+            draggedQuickWorkspace = populated.key
+            didDrag = true
+            updateDragTarget(at: reorderPoint)
+            precondition(quickReorderTargetWorkspace == "q0" && dragTargetWorkspace == nil)
+            precondition(completeQuickReorder(at: reorderPoint))
+            precondition(reorders.count == 1 && reorders[0].0 == populated.key && reorders[0].1 == "q0")
+            didDrag = false
+            draggedWindow = nil
+            draggedQuickWorkspace = nil
+            quickReorderTargetWorkspace = nil
+            onReorderQuickWorkspace = nil
+        }
+        revealQuickWorkspace(previousFocus)
+    }
+
+    private func drawQuickActions() {
+        if dragCreatesQuickWorkspace {
+            NSColor.controlAccentColor.withAlphaComponent(0.16).setFill()
+            NSBezierPath(roundedRect: quickHeaderRect, xRadius: 8, yRadius: 8).fill()
+        }
+        (dragCreatesQuickWorkspace ? "Drop to create a space" : "Quick actions").draw(
+            in: NSRect(
+                x: quickViewport.minX,
+                y: config.margin + 1,
+                width: max(0, bounds.width - quickViewport.minX - config.margin),
+                height: 18
+            ),
+            withAttributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                .foregroundColor: config.missionRowTextColor,
+            ]
+        )
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: quickViewport).addClip()
+        for (workspace, rect) in visibleQuickTiles() {
+            drawTile(workspace: workspace, rect: rect)
+            drawQuickCloseButton(for: workspace, in: rect)
+        }
+        drawQuickReorderIndicator()
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    private func drawQuickReorderIndicator() {
+        guard didDrag,
+              let source = draggedQuickWorkspace.flatMap(quickWorkspaceIndex),
+              let target = quickReorderTargetWorkspace.flatMap(quickWorkspaceIndex),
+              source != target
+        else { return }
+
+        let targetRect = quickTileRect(at: target)
+        let boundaryX = target < source
+            ? targetRect.minX - config.gap / 2
+            : targetRect.maxX + config.gap / 2
+        let x = max(quickViewport.minX + 1, min(quickViewport.maxX - 1, boundaryX))
+        let line = NSBezierPath()
+        line.move(to: NSPoint(x: x, y: quickViewport.minY + 6))
+        line.line(to: NSPoint(x: x, y: quickViewport.maxY - 6))
+        line.lineWidth = increaseContrast ? 3.5 : 2.5
+        line.lineCapStyle = .round
+        selectionBorder.setStroke()
+        line.stroke()
+    }
+
+    private func updateQuickDragScroll() {
+        guard quickDragScrollTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
+            guard let self, self.didDrag, self.draggedWindow != nil,
+                  let point = self.draggedWindowPoint, self.quickViewport.contains(point) else { return }
+            let delta: CGFloat = point.x < self.quickViewport.minX + 28 ? -12
+                : (point.x > self.quickViewport.maxX - 28 ? 12 : 0)
+            guard delta != 0 else { return }
+            self.setQuickScroll(self.quickScrollOffset + delta)
+            self.updateDragTarget(at: point)
+        }
+        quickDragScrollTimer = timer
+        RunLoop.current.add(timer, forMode: .common)
+    }
+
+    private func updateDragTarget(at point: NSPoint) {
+        dragCreatesQuickWorkspace = draggedWindow != nil && isQuickHeaderDrop(at: point)
+        if draggedQuickWorkspace != nil,
+           let target = quickReorderWorkspace(at: point)
+        {
+            quickReorderTargetWorkspace = target
+            dragTargetWorkspace = nil
+            dragCreatesQuickWorkspace = false
+            NSCursor.closedHand.set()
+            needsDisplay = true
+            return
+        }
+
+        quickReorderTargetWorkspace = nil
+        let target = workspace(at: point)
+        let allowed = target.map { target in
+            draggedWindow.map { canMoveWindow($0, to: target, in: windowsByWorkspace) } ?? false
+        } ?? false
+        dragTargetWorkspace = allowed ? target : nil
+        if target != nil && !allowed { NSCursor.operationNotAllowed.set() }
+        else { NSCursor.closedHand.set() }
+        needsDisplay = true
+    }
 
     // User-set project-lane names, keyed by grid row (1..9). Rows without an
     // entry fall back to `defaultRowName`. Persisted by the AppDelegate.
@@ -944,6 +1770,7 @@ private final class MissionControlView: NSView {
     var windowsByWorkspace: [String: [WorkspaceWindow]] = [:] {
         didSet {
             if oldValue != windowsByWorkspace {
+                needsLayout = true
                 needsDisplay = true
             }
         }
@@ -979,6 +1806,23 @@ private final class MissionControlView: NSView {
             return
         }
 
+        let reorderModifiers: NSEvent.ModifierFlags = [.command, .control]
+        if event.modifierFlags.contains(.option),
+           event.modifierFlags.intersection(reorderModifiers).isEmpty,
+           let sourceIndex = quickWorkspaceIndex(focusedWorkspace)
+        {
+            let targetIndex: Int?
+            switch event.keyCode {
+            case 123: targetIndex = sourceIndex > 0 ? sourceIndex - 1 : nil
+            case 124: targetIndex = sourceIndex < quickSpaceCount - 1 ? sourceIndex + 1 : nil
+            default: targetIndex = nil
+            }
+            if let targetIndex {
+                onReorderQuickWorkspace?(focusedWorkspace, "q\(targetIndex)")
+                return
+            }
+        }
+
         if let direction = keyboardNavigationDirection(for: event) {
             if let workspace = adjacentWorkspace(for: direction) {
                 onKeyboardWorkspaceNavigate?(workspace)
@@ -989,6 +1833,11 @@ private final class MissionControlView: NSView {
         let blockedModifiers: NSEvent.ModifierFlags = [.command, .control, .option]
         guard event.modifierFlags.intersection(blockedModifiers).isEmpty else {
             super.keyDown(with: event)
+            return
+        }
+
+        if event.characters == "+" {
+            addQuickWorkspace()
             return
         }
 
@@ -1011,6 +1860,7 @@ private final class MissionControlView: NSView {
         static let rowHeight: CGFloat = 24
         static let rowGap: CGFloat = 4
         static let railWidth: CGFloat = 30
+        static let quickBandHeight: CGFloat = 112
     }
 
     // Overflow-strip icon under the pointer: shows its app name as a tooltip.
@@ -1031,6 +1881,8 @@ private final class MissionControlView: NSView {
     private var draggedWindowSize = NSSize(width: 0, height: 0)
     private var draggedWindowPoint: NSPoint?
     private var dragTargetWorkspace: String?
+    private var draggedQuickWorkspace: String?
+    private var quickReorderTargetWorkspace: String?
 
     // Drag-to-bottom reveal: pressing a window drag against the bottom edge
     // reveals one empty row below as drop targets. Collapsed again if the drop
@@ -1176,6 +2028,7 @@ private final class MissionControlView: NSView {
 
         // Background, lensing, and rounded corners come from NSGlassEffectView.
         // This view draws only content-layer fills and navigation state.
+        drawQuickActions()
         let metrics = layoutMetrics()
 
         for rowIndex in 0..<visibleRows {
@@ -1215,7 +2068,7 @@ private final class MissionControlView: NSView {
         hoveredOverflowIcon = nil
         stopTooltipAnimation()
 
-        let rowValues = Array(Set(rows.filter { 1...workspaceRows ~= $0 })).sorted()
+        let rowValues = Array(Set(([1] + rows).filter { 1...workspaceRows ~= $0 })).sorted()
         let colValues = Array(Set(cols.filter { 0..<workspaceCols ~= $0 })).sorted()
         visibleRowValues = rowValues.isEmpty ? [1] : rowValues
         visibleColValues = colValues.isEmpty ? [0] : colValues
@@ -1256,7 +2109,21 @@ private final class MissionControlView: NSView {
         }
     }
 
-    private func adjacentWorkspace(for direction: GridNavigationDirection) -> String? {
+    fileprivate func adjacentWorkspace(for direction: GridNavigationDirection) -> String? {
+        if let index = quickWorkspaceIndex(focusedWorkspace) {
+            switch direction {
+            case .up: return nil
+            case .left: return index > 0 ? "q\(index - 1)" : nil
+            case .right: return index < quickSpaceCount - 1 ? "q\(index + 1)" : nil
+            case .down:
+                let col = visibleColValues.min { abs($0 - index) < abs($1 - index) } ?? 0
+                return workspaceName(row: 1, col: col)
+            }
+        }
+        if direction == .up, workspaceRow(focusedWorkspace) == 1,
+           let col = workspaceColumn(focusedWorkspace) {
+            return "q\(min(col, quickSpaceCount - 1))"
+        }
         guard let row = workspaceRow(focusedWorkspace),
               let col = workspaceColumn(focusedWorkspace),
               let rowIndex = visibleRowValues.firstIndex(of: row),
@@ -1461,12 +2328,17 @@ private final class MissionControlView: NSView {
             hoveredWindowID = nil
             needsDisplay = true
         }
+        if hoveredQuickCloseWorkspace != nil {
+            hoveredQuickCloseWorkspace = nil
+            needsDisplay = true
+        }
         onPointerExit?()
     }
 
     override func mouseMoved(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         updateOverflowHover(at: point)
+        updateQuickCloseHover(at: point)
         let nextHoveredWindowID = window(at: point)?.window.windowID
         if nextHoveredWindowID != hoveredWindowID {
             hoveredWindowID = nextHoveredWindowID
@@ -1475,6 +2347,11 @@ private final class MissionControlView: NSView {
 
         // A revealed + button takes pointer priority over edge-resize cursors.
         if let edge = activePlusEdge, plusButtonRect(for: edge).contains(point) {
+            NSCursor.pointingHand.set()
+            return
+        }
+
+        if hoveredQuickCloseWorkspace != nil {
             NSCursor.pointingHand.set()
             return
         }
@@ -1549,6 +2426,12 @@ private final class MissionControlView: NSView {
             return
         }
 
+        if let workspace = quickCloseWorkspace(at: point) {
+            suppressWorkspaceClickOnMouseUp = true
+            requestQuickWorkspaceRemoval(workspace)
+            return
+        }
+
         if let hit = window(at: point) {
             mouseDownScreenPoint = nil
             mouseDownFrameOrigin = nil
@@ -1556,6 +2439,7 @@ private final class MissionControlView: NSView {
             didDrag = false
             draggedWindow = hit.window
             draggedWindowSourceWorkspace = hit.workspace
+            draggedQuickWorkspace = quickWorkspaceIndex(hit.workspace) != nil ? hit.workspace : nil
             draggedWindowOffset = NSPoint(x: point.x - hit.rect.minX, y: point.y - hit.rect.minY)
             draggedWindowSize = hit.rect.size
             draggedWindowPoint = point
@@ -1627,9 +2511,8 @@ private final class MissionControlView: NSView {
             if didDrag {
                 maybeRevealDropRow(at: point)
                 draggedWindowPoint = point
-                dragTargetWorkspace = workspace(at: point)
-                NSCursor.closedHand.set()
-                needsDisplay = true
+                updateDragTarget(at: point)
+                updateQuickDragScroll()
             }
             return
         }
@@ -1671,10 +2554,15 @@ private final class MissionControlView: NSView {
             mouseDownViewPoint = nil
             draggedWindow = nil
             draggedWindowSourceWorkspace = nil
+            draggedQuickWorkspace = nil
+            quickReorderTargetWorkspace = nil
             draggedWindowOffset = NSPoint(x: 0, y: 0)
             draggedWindowSize = NSSize(width: 0, height: 0)
             draggedWindowPoint = nil
+            quickDragScrollTimer?.invalidate()
+            quickDragScrollTimer = nil
             dragTargetWorkspace = nil
+            dragCreatesQuickWorkspace = false
             activeResizeEdges = nil
             resizeStartMouse = nil
             resizeStartFrame = nil
@@ -1711,11 +2599,25 @@ private final class MissionControlView: NSView {
             let revealedRow = dragRevealedRow ? visibleRowValues.last : nil
             let usedRevealedRow = revealedRow != nil && drop.flatMap(workspaceRow) == revealedRow
 
+            if didDrag, completeQuickReorder(at: point) {
+                if dragRevealedRow { collapseRevealedDropRow(revealedRow) }
+                return
+            }
+
+            if didDrag, completeQuickHeaderDrop(draggedWindow, at: point) {
+                if dragRevealedRow { collapseRevealedDropRow(revealedRow) }
+                return
+            }
+
             if didDrag,
                let workspace = drop,
                workspace != draggedWindowSourceWorkspace
             {
-                onWindowMove?(draggedWindow, workspace)
+                if canMoveWindow(draggedWindow, to: workspace, in: windowsByWorkspace) {
+                    onWindowMove?(draggedWindow, workspace)
+                } else {
+                    NSSound.beep()
+                }
                 if dragRevealedRow, !usedRevealedRow { collapseRevealedDropRow(revealedRow) }
                 return
             }
@@ -1742,7 +2644,7 @@ private final class MissionControlView: NSView {
         let point = convert(event.locationInWindow, from: nil)
         var positioningItem: NSMenuItem?
 
-        if let workspace = workspace(at: point) {
+        if let workspace = workspace(at: point), workspaceRow(workspace) != nil {
             let beforeItem = NSMenuItem(
                 title: "Add Workspace Before",
                 action: #selector(insertWorkspaceBeforeFromMenu(_:)),
@@ -1807,7 +2709,7 @@ private final class MissionControlView: NSView {
 
     func preferredHeight(for rowCount: Int) -> CGFloat {
         let rows = CGFloat(max(1, min(workspaceRows, rowCount)))
-        return config.margin * 2 + config.headerHeight + config.gap * (rows - 1) + config.tileHeight * rows
+        return config.margin * 2 + config.headerHeight + quickBandHeight + config.gap * (rows - 1) + config.tileHeight * rows
     }
 
     func preferredWidth(for colCount: Int) -> CGFloat {
@@ -1827,9 +2729,9 @@ private final class MissionControlView: NSView {
         // its right so hit-testing and drawing stay aligned.
         let gridRect = NSRect(
             x: config.margin + Style.railWidth,
-            y: config.margin + config.headerHeight,
+            y: config.margin + config.headerHeight + Style.quickBandHeight,
             width: bounds.width - config.margin * 2 - Style.railWidth,
-            height: bounds.height - config.margin * 2 - config.headerHeight
+            height: max(1, bounds.height - config.margin * 2 - config.headerHeight - Style.quickBandHeight)
         )
         let colCount = max(1, visibleCols)
         let tileWidth = (gridRect.width - config.gap * CGFloat(colCount - 1)) / CGFloat(colCount)
@@ -1881,6 +2783,9 @@ private final class MissionControlView: NSView {
     }
 
     func tileRect(for workspace: String) -> NSRect? {
+        if let index = quickWorkspaceIndex(workspace), index < quickSpaceCount {
+            return quickTileRect(at: index)
+        }
         guard let row = workspaceRow(workspace),
               let col = workspaceColumn(workspace)
         else { return nil }
@@ -1894,6 +2799,9 @@ private final class MissionControlView: NSView {
     }
 
     private func workspace(at point: NSPoint) -> String? {
+        if quickViewport.contains(point) {
+            return visibleQuickTiles().first(where: { $0.1.contains(point) })?.0
+        }
         let metrics = layoutMetrics()
         guard point.x >= metrics.gridRect.minX,
               point.y >= metrics.gridRect.minY
@@ -2048,6 +2956,14 @@ private final class MissionControlView: NSView {
         }
     }
 
+    private func updateQuickCloseHover(at point: NSPoint) {
+        let workspace = quickCloseWorkspace(at: point)
+        if workspace != hoveredQuickCloseWorkspace {
+            hoveredQuickCloseWorkspace = workspace
+            needsDisplay = true
+        }
+    }
+
     // Content size of an overflow tooltip: a full window chip (icon + app name +
     // dim title), measured so nothing truncates.
     private func overflowChipSize(for window: WorkspaceWindow) -> NSSize {
@@ -2185,6 +3101,12 @@ private final class MissionControlView: NSView {
     }
 
     private func drawWorkspaceLabel(_ workspace: String, windows: [WorkspaceWindow], in rect: NSRect) {
+        if quickWorkspaceIndex(workspace) != nil {
+            if let window = windows.first {
+                drawQuickAppIcon(window, in: rect, fraction: didDrag && draggedWindow?.windowID == window.windowID ? 0.3 : 1)
+            }
+            return
+        }
         guard !windows.isEmpty else { return }
 
         let rows = windowChipRects(workspace: workspace, tileRect: rect)
@@ -2225,6 +3147,11 @@ private final class MissionControlView: NSView {
     private func windowChipRects(workspace: String, tileRect: NSRect) -> [(WorkspaceWindow, NSRect)] {
         let windows = windowsByWorkspace[workspace] ?? []
         guard !windows.isEmpty else { return [] }
+        if quickWorkspaceIndex(workspace) != nil {
+            // One app icon represents the space. Preserve existing window-drag
+            // semantics using its first window; all same-app windows stay stored.
+            return [(windows[0], tileRect)]
+        }
 
         let x = tileRect.minX + Style.pad
         let width = max(0, tileRect.width - Style.pad * 2)
@@ -2351,7 +3278,30 @@ private final class MissionControlView: NSView {
             width: draggedWindowSize.width,
             height: draggedWindowSize.height
         )
-        drawWindowChip(draggedWindow, in: rect, isFloating: true, isSourceGhost: false)
+        guard draggedQuickWorkspace != nil else {
+            drawWindowChip(draggedWindow, in: rect, isFloating: true, isSourceGhost: false)
+            return
+        }
+
+        NSGraphicsContext.saveGraphicsState()
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.shadowColor.withAlphaComponent(0.32)
+        shadow.shadowBlurRadius = 14
+        shadow.shadowOffset = NSSize(width: 0, height: -4)
+        shadow.set()
+        selectionFill.setFill()
+        NSBezierPath(roundedRect: rect, xRadius: tileRadius, yRadius: tileRadius).fill()
+        NSGraphicsContext.restoreGraphicsState()
+
+        selectionBorder.setStroke()
+        let border = NSBezierPath(
+            roundedRect: rect.insetBy(dx: 0.5, dy: 0.5),
+            xRadius: max(0, tileRadius - 0.5),
+            yRadius: max(0, tileRadius - 0.5)
+        )
+        border.lineWidth = 1
+        border.stroke()
+        drawQuickAppIcon(draggedWindow, in: rect)
     }
 
     // During a row reorder: dim the lifted lane and draw an accent insertion
@@ -2561,6 +3511,154 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var statusTimer: Timer?
     private var aeroSpaceResponsive = true
+    private var quickSpaceCount = 1
+    private var quickCountWriteInFlight = false
+    private var windowMoveInFlight = false
+    private var windowInventoryGeneration = 0
+    private let navigationQueue = DispatchQueue(label: "aerospace.hud.navigation", qos: .userInitiated)
+    private var focusRequestGeneration = 0
+    private var focusRequestInFlight = false
+
+    private func applyQuickCount(_ count: Int, allowShrink: Bool = false) {
+        let normalized = max(1, count)
+        quickSpaceCount = allowShrink ? normalized : max(quickSpaceCount, normalized)
+        if view.quickSpaceCount != quickSpaceCount { view.quickSpaceCount = quickSpaceCount }
+        if missionView.quickSpaceCount != quickSpaceCount { missionView.quickSpaceCount = quickSpaceCount }
+    }
+
+    private func syncQuickSpaces() {
+        let diskCount = QuickSpaces.readCount()
+        applyQuickCount(QuickSpaces.requiredCount(stored: diskCount, current: quickSpaceCount,
+            workspaces: Array(view.windowsByWorkspace.keys) + [view.focusedWorkspace]))
+        guard !quickCountWriteInFlight,
+              quickSpaceCount > diskCount || !FileManager.default.fileExists(atPath: QuickSpaces.path)
+        else { return }
+        quickCountWriteInFlight = true
+        let desired = quickSpaceCount
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let saved = QuickSpaces.withLock { () -> Int? in
+                let count = max(desired, QuickSpaces.readCount())
+                return QuickSpaces.saveCount(count) ? count : nil
+            } ?? nil
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.quickCountWriteInFlight = false
+                if let saved { self.applyQuickCount(saved) }
+            }
+        }
+    }
+
+    private func addQuickWorkspace() {
+        let current = quickSpaceCount
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let saved = QuickSpaces.addSlot(minimumCount: current) {
+                guard let inventory = self.aerospace.windowInventory(),
+                      let focus = self.aerospace.focusedWorkspace() else { return nil }
+                return Array(inventory.keys) + [focus]
+            }
+            DispatchQueue.main.async {
+                guard let saved else { NSSound.beep(); return }
+                self.applyQuickCount(saved)
+                // Reveal the new empty slot, but do not switch AeroSpace focus.
+                self.missionView.revealQuickWorkspace("q\(saved - 1)")
+            }
+        }
+    }
+
+    private func removeQuickWorkspace(_ workspace: String) {
+        guard let index = quickWorkspaceIndex(workspace),
+              quickSpaceCount > 1,
+              view.windowsByWorkspace[workspace, default: []].isEmpty,
+              !quickCountWriteInFlight,
+              !windowMoveInFlight
+        else { NSSound.beep(); return }
+
+        windowMoveInFlight = true
+        windowInventoryGeneration += 1
+        let currentCount = quickSpaceCount
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let removal = self.aerospace.removeQuickWorkspace(at: index, minimumCount: currentCount)
+            DispatchQueue.main.async {
+                self.windowMoveInFlight = false
+                self.windowInventoryGeneration += 1
+                guard let removal else {
+                    NSSound.beep()
+                    self.pollWindows()
+                    return
+                }
+
+                self.applyQuickCount(removal.count, allowShrink: true)
+                self.view.windowsByWorkspace = removal.inventory
+                self.missionView.windowsByWorkspace = removal.inventory
+                self.setFocusedWorkspace(removal.focusedWorkspace, showMiniHud: false)
+                self.writeFocusedState(removal.focusedWorkspace)
+                self.syncQuickSpaces()
+                _ = self.updateVisibleGrid()
+                self.missionView.revealQuickWorkspace(removal.focusedWorkspace)
+                self.pollWindows()
+                self.refocusMissionControlKeyboard(after: 0.15)
+            }
+        }
+    }
+
+    private func reorderQuickWorkspace(from sourceWorkspace: String, to targetWorkspace: String) {
+        guard let sourceIndex = quickWorkspaceIndex(sourceWorkspace),
+              let targetIndex = quickWorkspaceIndex(targetWorkspace),
+              sourceIndex != targetIndex,
+              !windowMoveInFlight
+        else { return }
+
+        let snapshot = view.windowsByWorkspace
+        let previousFocus = view.focusedWorkspace
+        guard let optimistic = quickSpaceReorder(
+            from: sourceIndex,
+            to: targetIndex,
+            count: quickSpaceCount,
+            focusedWorkspace: previousFocus,
+            inventory: snapshot
+        ) else { NSSound.beep(); return }
+
+        windowMoveInFlight = true
+        windowInventoryGeneration += 1
+        view.windowsByWorkspace = optimistic.inventory
+        missionView.windowsByWorkspace = optimistic.inventory
+        setFocusedWorkspace(optimistic.focusedWorkspace, showMiniHud: false)
+
+        let currentCount = quickSpaceCount
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let reorder = self.aerospace.reorderQuickWorkspace(
+                from: sourceIndex,
+                to: targetIndex,
+                minimumCount: currentCount
+            )
+            DispatchQueue.main.async {
+                self.windowMoveInFlight = false
+                self.windowInventoryGeneration += 1
+                guard let reorder else {
+                    self.view.windowsByWorkspace = snapshot
+                    self.missionView.windowsByWorkspace = snapshot
+                    self.setFocusedWorkspace(previousFocus, showMiniHud: false)
+                    NSSound.beep()
+                    self.pollWindows()
+                    return
+                }
+
+                self.applyQuickCount(reorder.count)
+                self.view.windowsByWorkspace = reorder.inventory
+                self.missionView.windowsByWorkspace = reorder.inventory
+                self.setFocusedWorkspace(reorder.focusedWorkspace, showMiniHud: false)
+                if reorder.focusedWorkspace != previousFocus {
+                    self.writeFocusedState(reorder.focusedWorkspace)
+                }
+                self.missionView.revealQuickWorkspace(targetWorkspace)
+                self.pollWindows()
+                self.refocusMissionControlKeyboard(after: 0.15)
+            }
+        }
+    }
 
     override init() {
         self.config = HudConfig.load()
@@ -2585,6 +3683,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             // window. Finder is especially prone to losing that race.
             self.hideMissionControl()
             self.focus(window: window)
+        }
+        syncQuickSpaces()
+        missionView.onAddQuickWorkspace = { [weak self] in self?.addQuickWorkspace() }
+        missionView.onRemoveQuickWorkspace = { [weak self] workspace in
+            self?.removeQuickWorkspace(workspace)
+        }
+        missionView.onWindowDropOnQuickHeader = { [weak self] window in
+            self?.createQuickWorkspace(containing: window)
+        }
+        missionView.onReorderQuickWorkspace = { [weak self] source, target in
+            self?.reorderQuickWorkspace(from: source, to: target)
         }
         missionView.onWindowMove = { [weak self] window, workspace in
             self?.move(window: window, to: workspace)
@@ -3022,12 +4131,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             if let col = workspaceColumn(workspace) { colSet.insert(col) }
         }
 
-        if rowSet.isEmpty, let row = workspaceRow(view.focusedWorkspace) { rowSet.insert(row) }
-        if colSet.isEmpty, let col = workspaceColumn(view.focusedWorkspace) { colSet.insert(col) }
+        if let row = workspaceRow(view.focusedWorkspace) { rowSet.insert(row) }
+        if let col = workspaceColumn(view.focusedWorkspace) { colSet.insert(col) }
         if rowSet.isEmpty { rowSet.insert(1) }
         if colSet.isEmpty { colSet.insert(0) }
 
-        let rows = Array(rowSet.min()!...rowSet.max()!)
+        let rows = Array(Set([1] + Array(rowSet.min()!...rowSet.max()!))).sorted()
         let cols = Array(colSet.min()!...colSet.max()!)
         return (rows, cols)
     }
@@ -3049,7 +4158,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let tileAspect = screen.height / screen.width
 
         let chromeWidth = config.margin * 2 + MissionControlView.Style.railWidth + config.gap * (colCount - 1)
-        let chromeHeight = config.margin * 2 + config.headerHeight + config.gap * (rowCount - 1)
+        let chromeHeight = config.margin * 2 + MissionControlView.Style.quickBandHeight + config.gap * (rowCount - 1)
 
         let tileWidthForWidth = (maxWidth - chromeWidth) / colCount
         let tileWidthForHeight = ((maxHeight - chromeHeight) / rowCount) / tileAspect
@@ -3101,9 +4210,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func pollStateHint() {
+        guard !focusRequestInFlight else { pollShowSignal(); return }
         guard let hint = try? String(contentsOfFile: focusedStatePath, encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines),
-            hint.range(of: #"^w[1-9][0-9]$"#, options: .regularExpression) != nil
+            isManagedWorkspace(hint)
         else {
             pollShowSignal()
             return
@@ -3125,10 +4235,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         if let workspace = signal
             .split(whereSeparator: \.isWhitespace)
             .map(String.init)
-            .first(where: { $0.range(of: #"^w[1-9][0-9]$"#, options: .regularExpression) != nil })
+            .first(where: isManagedWorkspace)
         {
             setFocusedWorkspace(workspace)
-            writeFocusedState(workspace)
         }
 
         pollWindows()
@@ -3136,18 +4245,22 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func pollFocusedWorkspace() {
-        guard !focusedPollInFlight else { return }
+        guard !focusedPollInFlight, !focusRequestInFlight else { return }
         focusedPollInFlight = true
+        let generation = focusRequestGeneration
 
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
-            let focused = self.aerospace.focusedWorkspace()
+            let focused = QuickSpaces.withLock { () -> String? in
+                guard let focused = self.aerospace.focusedWorkspace() else { return nil }
+                self.writeFocusedState(focused)
+                return focused
+            } ?? nil
 
             DispatchQueue.main.async {
                 self.aeroSpaceResponsive = focused != nil
-                if let focused {
+                if let focused, !self.focusRequestInFlight, generation == self.focusRequestGeneration {
                     self.setFocusedWorkspace(focused)
-                    self.writeFocusedState(focused)
                 }
                 self.focusedPollInFlight = false
             }
@@ -3155,14 +4268,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func pollWindows() {
-        guard !windowsPollInFlight else { return }
+        guard !windowsPollInFlight, !windowMoveInFlight else { return }
         windowsPollInFlight = true
+        let generation = windowInventoryGeneration
 
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
-            let windows = self.aerospace.windowsByWorkspace()
+            let inventory = self.aerospace.windowInventory()
 
             DispatchQueue.main.async {
+                guard generation == self.windowInventoryGeneration,
+                      !self.windowMoveInFlight, let windows = inventory else {
+                    self.windowsPollInFlight = false
+                    return
+                }
                 // Reveal only on a structural change (window added/removed/moved
                 // between workspaces, or app set changed) — NOT on bare title
                 // churn. Window titles update constantly with no user action
@@ -3173,6 +4292,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 let layoutChanged = self.layoutSignature(self.view.windowsByWorkspace) != self.layoutSignature(windows)
                 self.view.windowsByWorkspace = windows
                 self.missionView.windowsByWorkspace = windows
+                self.syncQuickSpaces()
                 let gridChanged = self.updateVisibleGrid()
                 if layoutChanged || gridChanged {
                     self.showPanelTemporarily()
@@ -3197,11 +4317,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setFocusedWorkspace(_ workspace: String, showMiniHud: Bool = true) {
-        guard workspace.range(of: #"^w[1-9][0-9]$"#, options: .regularExpression) != nil else { return }
+        guard isManagedWorkspace(workspace) else { return }
 
         let focusedChanged = view.focusedWorkspace != workspace
         view.focusedWorkspace = workspace
         missionView.focusedWorkspace = workspace
+        if let index = quickWorkspaceIndex(workspace) { applyQuickCount(index + 1) }
+        if focusedChanged {
+            view.revealQuickWorkspace(workspace)
+            missionView.revealQuickWorkspace(workspace)
+        }
         let gridChanged = updateVisibleGrid()
 
         if showMiniHud && (focusedChanged || gridChanged) {
@@ -3215,56 +4340,110 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func jump(to workspace: String, showMiniHud: Bool = true, refocusMissionControl: Bool = false) {
-        setFocusedWorkspace(workspace, showMiniHud: showMiniHud)
-        writeFocusedState(workspace)
-
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            self.aerospace.switchWorkspace(workspace)
-            guard refocusMissionControl else { return }
-
-            DispatchQueue.main.async { [weak self] in
-                self?.refocusMissionControlKeyboard()
-                self?.refocusMissionControlKeyboard(after: 0.15)
-            }
+        guard isManagedWorkspace(workspace) else { return }
+        navigate(to: workspace, showMiniHud: showMiniHud, refocusMissionControl: refocusMissionControl) { [aerospace] in
+            aerospace.switchWorkspace(workspace)
         }
     }
 
     private func focus(window: WorkspaceWindow) {
-        setFocusedWorkspace(window.workspace)
-        writeFocusedState(window.workspace)
+        navigate(to: window.workspace, showMiniHud: true, refocusMissionControl: false) { [aerospace] in
+            aerospace.focusWindow(window)
+        }
+    }
 
+    private func navigate(to workspace: String, showMiniHud: Bool, refocusMissionControl: Bool,
+                          command: @escaping () -> Bool) {
+        focusRequestGeneration += 1
+        let generation = focusRequestGeneration
+        focusRequestInFlight = true
+        setFocusedWorkspace(workspace, showMiniHud: showMiniHud)
+        // Serialize rapid arrow repeats. Publish the shared hint only after a
+        // successful CLI command, inside the same lock used by shell navigation.
+        navigationQueue.async { [weak self] in
+            guard let self else { return }
+            let succeeded = QuickSpaces.withLock {
+                guard command() else { return false }
+                self.writeFocusedState(workspace)
+                return true
+            } ?? false
+            DispatchQueue.main.async {
+                guard generation == self.focusRequestGeneration else { return }
+                self.focusRequestInFlight = false
+                if !succeeded { NSSound.beep(); self.pollFocusedWorkspace() }
+                if refocusMissionControl {
+                    self.refocusMissionControlKeyboard()
+                    self.refocusMissionControlKeyboard(after: 0.15)
+                }
+            }
+        }
+    }
+
+    private func createQuickWorkspace(containing window: WorkspaceWindow) {
+        guard !windowMoveInFlight else { NSSound.beep(); return }
+        windowMoveInFlight = true
+        windowInventoryGeneration += 1
+        let minimum = max(view.quickSpaceCount, missionView.quickSpaceCount)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.aerospace.focusWindow(window)
+            guard let self else { return }
+            let count = self.aerospace.createQuickWorkspace(containing: window, minimumCount: minimum)
+            let inventory = self.aerospace.windowInventory()
+            DispatchQueue.main.async {
+                self.windowMoveInFlight = false
+                self.windowInventoryGeneration += 1
+                if let count {
+                    self.applyQuickCount(count)
+                    let target = "q\(count - 1)"
+                    self.view.windowsByWorkspace = inventory ?? self.windowsByMoving(
+                        window: window, to: target, in: self.view.windowsByWorkspace)
+                    self.missionView.windowsByWorkspace = self.view.windowsByWorkspace
+                    _ = self.updateVisibleGrid()
+                    self.missionView.revealQuickWorkspace(target)
+                } else {
+                    NSSound.beep()
+                }
+                self.pollWindows()
+                self.refocusMissionControlKeyboard(after: 0.15)
+            }
         }
     }
 
     private func move(window: WorkspaceWindow, to workspace: String) {
-        guard workspace.range(of: #"^w[1-9][0-9]$"#, options: .regularExpression) != nil,
-              workspace != window.workspace
-        else { return }
+        guard isManagedWorkspace(workspace), workspace != window.workspace else { return }
+        guard !windowMoveInFlight,
+              canMoveWindow(window, to: workspace, in: view.windowsByWorkspace) else {
+            NSSound.beep()
+            return
+        }
 
+        windowMoveInFlight = true
+        windowInventoryGeneration += 1
         let previous = view.windowsByWorkspace
         view.windowsByWorkspace = windowsByMoving(window: window, to: workspace, in: previous)
         missionView.windowsByWorkspace = view.windowsByWorkspace
-        let gridChanged = updateVisibleGrid()
-        if gridChanged {
-            showPanelTemporarily()
-        }
+        syncQuickSpaces()
+        if updateVisibleGrid() { showPanelTemporarily() }
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
+            // Client rechecks fresh inventory under the shared cross-process
+            // lock. Optimism never authorizes a mixed-app move by itself.
             let moved = self.aerospace.moveWindow(window, to: workspace)
-
+            let inventory = self.aerospace.windowInventory()
             DispatchQueue.main.async {
-                if moved {
-                    self.pollWindows()
-                } else {
+                self.windowMoveInFlight = false
+                self.windowInventoryGeneration += 1
+                if let inventory {
+                    self.view.windowsByWorkspace = inventory
+                    self.missionView.windowsByWorkspace = inventory
+                } else if !moved {
                     self.view.windowsByWorkspace = previous
                     self.missionView.windowsByWorkspace = previous
-                    _ = self.updateVisibleGrid()
-                    self.showPanelTemporarily()
                 }
+                if !moved { NSSound.beep() }
+                self.syncQuickSpaces()
+                _ = self.updateVisibleGrid()
+                self.pollWindows()
             }
         }
     }
@@ -3294,6 +4473,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func pollConfigFile() {
+        syncQuickSpaces()
         guard let modified = HudConfig.modificationDate() else { return }
         guard let previous = lastConfigModificationDate else {
             lastConfigModificationDate = modified
@@ -3414,6 +4594,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         suppressMissionFrameSave = true
         missionPanel.setFrame(frame, display: true)
         suppressMissionFrameSave = false
+        missionView.layoutSubtreeIfNeeded()
+        missionView.revealQuickWorkspace(view.focusedWorkspace)
         missionPanel.orderFrontRegardless()
         refocusMissionControlKeyboard()
         installMissionClickMonitor()
@@ -3596,7 +4778,199 @@ extension AppDelegate: NSMenuDelegate {
     }
 }
 
+// Opt-in regression/visual fixtures. These paths do not start the delegate,
+// query AeroSpace, activate an application, or capture the user's screen.
+private func quickFixtureWindows() -> [String: [WorkspaceWindow]] {
+    var inventory: [String: [WorkspaceWindow]] = [:]
+    func add(_ workspace: String, _ id: String, _ app: String, _ title: String, _ bundle: String) {
+        inventory[workspace, default: []].append(WorkspaceWindow(workspace: workspace, windowID: id,
+            appName: app, windowTitle: title, bundleID: bundle))
+    }
+    add("q0", "1", "Safari", "Reading list", "com.apple.Safari")
+    for index in 0..<4 { add("q1", "t\(index)", "Terminal", "Session \(index + 1)", "com.apple.Terminal") }
+    add("q4", "2", "Finder", "Projects", "com.apple.finder")
+    add("w10", "3", "Safari", "Project notes", "com.apple.Safari")
+    add("w11", "4", "Terminal", "Build", "com.apple.Terminal")
+    add("w20", "5", "Finder", "Assets", "com.apple.finder")
+    return inventory
+}
+
+private func testQuickSpaces() throws {
+    for (name, expected) in [("q0", 0), ("q9", 9), ("q10", 10), ("q123456", 123456)] {
+        precondition(quickWorkspaceIndex(name) == expected && isManagedWorkspace(name))
+        precondition(workspaceRow(name) == nil && workspaceColumn(name) == nil)
+    }
+    for name in ["q", "q00", "q01", "q-1", "q+1", "q1.0", "q1x", "Q1", "q 1", "q999999999999999999999999"] {
+        precondition(quickWorkspaceIndex(name) == nil && !isManagedWorkspace(name), "Invalid alias: \(name)")
+    }
+    precondition(workspaceRow("w10") == 1 && workspaceColumn("w99") == 9)
+    let first = WorkspaceWindow(workspace: "w10", windowID: "1", appName: "Terminal", windowTitle: "One", bundleID: "app.terminal")
+    let same = WorkspaceWindow(workspace: "q0", windowID: "2", appName: "Other display name", windowTitle: "Two", bundleID: "app.terminal")
+    let fallback = WorkspaceWindow(workspace: "q0", windowID: "3", appName: "Terminal", windowTitle: "Three", bundleID: "")
+    let different = WorkspaceWindow(workspace: "q0", windowID: "4", appName: "Terminal", windowTitle: "Four", bundleID: "app.other")
+    precondition(first.belongsToSameApplication(as: same))
+    precondition(first.belongsToSameApplication(as: fallback) && fallback.belongsToSameApplication(as: first))
+    precondition(!first.belongsToSameApplication(as: different))
+    precondition(canMoveWindow(first, to: "q0", in: [:]))
+    precondition(canMoveWindow(first, to: "q0", in: ["q0": [same, fallback]]))
+    precondition(!canMoveWindow(first, to: "q0", in: ["q0": [same, different]]))
+    precondition(canMoveWindow(first, to: "w11", in: ["w11": [different]]))
+    precondition(!canMoveWindow(first, to: "q01", in: [:]))
+    let compacted = quickSpaceCompaction(removing: 2, count: 6, inventory: quickFixtureWindows())
+    precondition(compacted?.count == 5)
+    precondition(compacted?.inventory["q2"] == nil)
+    precondition(compacted?.inventory["q3"]?.first?.workspace == "q3")
+    precondition(compacted?.inventory["q3"]?.first?.appName == "Finder")
+    precondition(compacted?.moves.map(\.target) == ["q3"])
+    precondition(quickSpaceCompaction(removing: 1, count: 6, inventory: quickFixtureWindows()) == nil,
+                 "Populated Quick actions must not be removable")
+    precondition(quickSpaceCompaction(removing: 0, count: 1, inventory: [:]) == nil,
+                 "At least one Quick actions slot must remain")
+    precondition(quickFocusAfterRemovingSlot(2, count: 6, focusedWorkspace: "q4") == "q3")
+    precondition(quickFocusAfterRemovingSlot(5, count: 6, focusedWorkspace: "q5") == "q4")
+    precondition(quickFocusAfterRemovingSlot(2, count: 6, focusedWorkspace: "w10") == "w10")
+    let reorderedRight = quickSpaceReorder(
+        from: 1,
+        to: 4,
+        count: 6,
+        focusedWorkspace: "q1",
+        inventory: quickFixtureWindows()
+    )
+    precondition(reorderedRight?.focusedWorkspace == "q4")
+    precondition(reorderedRight?.inventory["q3"]?.first?.appName == "Finder")
+    precondition(reorderedRight?.inventory["q4"]?.count == 4)
+    precondition(reorderedRight?.inventory["q4"]?.allSatisfy { $0.workspace == "q4" } == true)
+    precondition(reorderedRight?.moves.map(\.target) == [
+        "q6", "q6", "q6", "q6", "q3", "q4", "q4", "q4", "q4",
+    ])
+    let reorderedLeft = quickSpaceReorder(
+        from: 4,
+        to: 0,
+        count: 6,
+        focusedWorkspace: "q1",
+        inventory: quickFixtureWindows()
+    )
+    precondition(reorderedLeft?.focusedWorkspace == "q2")
+    precondition(reorderedLeft?.inventory["q0"]?.first?.appName == "Finder")
+    precondition(reorderedLeft?.inventory["q1"]?.first?.appName == "Safari")
+    precondition(reorderedLeft?.inventory["q2"]?.count == 4)
+    precondition(quickSpaceReorder(
+        from: 2,
+        to: 0,
+        count: 6,
+        focusedWorkspace: "w10",
+        inventory: quickFixtureWindows()
+    ) == nil, "An empty Quick actions slot is not a draggable item")
+    let warnedInventory = AeroSpaceClient.parseWindowInventory("Warning: restored workspace\nq0\t1\tTerminal\tapp.terminal\tOne\n")
+    precondition(warnedInventory?["q0"]?.first?.windowID == "1")
+    precondition(AeroSpaceClient.parseWindowInventory("q0\t1\tTerminal") == nil)
+    precondition(AeroSpaceClient.parseWindowInventory("q0\t1\tTerminal\t\t")?["q0"]?.first?.bundleID == "")
+
+    // Refuse to touch any existing state; callers supply a fresh fixture path.
+    guard let override = ProcessInfo.processInfo.environment["AEROSPACE_QUICK_SPACES_FILE"],
+          !override.isEmpty, !FileManager.default.fileExists(atPath: override) else {
+        throw NSError(domain: "QuickSpacesTests", code: 1,
+                      userInfo: [NSLocalizedDescriptionKey: "Set AEROSPACE_QUICK_SPACES_FILE to a new fixture file before testing."])
+    }
+    precondition(QuickSpaces.readCount() == 1)
+    precondition(QuickSpaces.withLock { QuickSpaces.saveCount(4) } == true)
+    precondition(QuickSpaces.readCount() == 4)
+    precondition(QuickSpaces.requiredCount(stored: 1, current: 1, workspaces: ["q12", "w99", "q01"]) == 13)
+    precondition(QuickSpaces.requiredCount(stored: 20, current: 2, workspaces: ["q12"]) == 20)
+    precondition(QuickSpaces.requiredCount(stored: 1, current: 8, workspaces: []) == 8)
+    let persisted = try String(contentsOfFile: override, encoding: .utf8)
+    precondition(persisted == "4\n")
+    precondition(QuickSpaces.addSlot(minimumCount: 2, observedWorkspaces: { [] }) == 5 && QuickSpaces.readCount() == 5)
+    precondition(QuickSpaces.addSlot(minimumCount: 5, observedWorkspaces: { nil }) == nil)
+    precondition(QuickSpaces.readCount() == 5, "Failed inventory must not create a slot")
+    precondition(QuickSpaces.addSlot(minimumCount: 5, observedWorkspaces: { ["q12", "w10"] }) == 14)
+    precondition(QuickSpaces.readCount() == 14, "New slot must be beyond occupied quick spaces")
+    precondition(QuickSpaces.addSlot(minimumCount: 14, populate: { _ in false }, observedWorkspaces: { [] }) == nil)
+    precondition(QuickSpaces.readCount() == 14, "Failed header move must roll back its reserved slot")
+    precondition(QuickSpaces.addSlot(minimumCount: 14, populate: { target in
+        precondition(target == "q14" && QuickSpaces.readCount() == 15)
+        return true
+    }, observedWorkspaces: { [] }) == 15)
+    try "invalid\n".write(toFile: override, atomically: true, encoding: .utf8)
+    precondition(QuickSpaces.readCount() == 1)
+    precondition(QuickSpaces.saveCount(1))
+
+    for width: CGFloat in [360, 1000] {
+        var config = HudConfig()
+        config.headerHeight = 0
+        let view = MissionControlView(frame: NSRect(x: 0, y: 0, width: width, height: 420), config: config)
+        view.quickSpaceCount = 16
+        view.windowsByWorkspace = quickFixtureWindows()
+        view.setGrid(rows: [2], cols: [0, 3, 9])
+        view.focusedWorkspace = "q15"
+        view.verifyQuickLayout()
+        precondition(view.adjacentWorkspace(for: .down) == "w19")
+        precondition(view.adjacentWorkspace(for: .right) == nil)
+        precondition(view.adjacentWorkspace(for: .left) == "q14")
+        precondition(view.adjacentWorkspace(for: .up) == nil)
+        view.focusedWorkspace = "w13"
+        view.quickSpaceCount = 2
+        precondition(view.adjacentWorkspace(for: .up) == "q1")
+        precondition(view.adjacentWorkspace(for: .down) == "w23")
+        precondition(view.adjacentWorkspace(for: .right) == "w19")
+        view.focusedWorkspace = "q0"
+        precondition(view.adjacentWorkspace(for: .left) == nil)
+        precondition(view.adjacentWorkspace(for: .down) == "w10")
+    }
+    print("PASS: quick parsing, app identity, mixed-app guard, persistence/lock, navigation, native add/remove, compaction, drag reorder, icon-only layout, header drop and move rollback (360/1000pt)")
+}
+
+private func renderQuickSpaces(to path: String) throws {
+    let directory = URL(fileURLWithPath: path, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    for (name, width, focus) in [("wide", CGFloat(1000), "q0"), ("narrow", CGFloat(420), "q15")] {
+        var config = HudConfig.load()
+        config.headerHeight = 0
+        let view = MissionControlView(frame: NSRect(x: 0, y: 0, width: width, height: 480), config: config)
+        view.appearance = NSAppearance(named: .aqua)
+        view.quickSpaceCount = 16
+        view.windowsByWorkspace = quickFixtureWindows()
+        view.setGrid(rows: [1, 2], cols: [0, 1])
+        view.focusedWorkspace = focus
+        view.needsLayout = true
+        view.layoutSubtreeIfNeeded()
+        view.revealQuickWorkspace(focus)
+        guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+            throw NSError(domain: "QuickSpacesRender", code: 1)
+        }
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        // This is an offscreen fixture, without the live glass/backdrop behind
+        // the transparent content view. Composite a neutral background so the
+        // captured text and native controls can be inspected in any image viewer.
+        let preview = NSImage(size: view.bounds.size)
+        preview.lockFocus()
+        NSColor(calibratedRed: 0.94, green: 0.95, blue: 0.96, alpha: 1).setFill()
+        NSBezierPath(rect: view.bounds).fill()
+        let content = NSImage(size: view.bounds.size)
+        content.addRepresentation(bitmap)
+        content.draw(in: view.bounds, from: .zero, operation: .sourceOver, fraction: 1)
+        preview.unlockFocus()
+        guard let tiff = preview.tiffRepresentation,
+              let rendered = NSBitmapImageRep(data: tiff),
+              let png = rendered.representation(using: .png, properties: [:]) else {
+            throw NSError(domain: "QuickSpacesRender", code: 2)
+        }
+        let output = directory.appendingPathComponent("quick-actions-\(name).png")
+        try png.write(to: output)
+        print(output.path)
+    }
+}
+
 let app = NSApplication.shared
-private let delegate = AppDelegate()
-app.delegate = delegate
-app.run()
+if CommandLine.arguments.contains("--test-quick-spaces") {
+    app.setActivationPolicy(.prohibited)
+    do { try testQuickSpaces() } catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
+} else if let index = CommandLine.arguments.firstIndex(of: "--render-quick-spaces"), index + 1 < CommandLine.arguments.count {
+    app.setActivationPolicy(.prohibited)
+    do { try renderQuickSpaces(to: CommandLine.arguments[index + 1]) }
+    catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
+} else {
+    let delegate = AppDelegate()
+    app.delegate = delegate
+    withExtendedLifetime(delegate) { app.run() }
+}
